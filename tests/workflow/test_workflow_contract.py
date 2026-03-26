@@ -16,6 +16,8 @@ class WorkflowContractTests(unittest.TestCase):
 
         self.assertIn("on:", workflow_text)
         self.assertIn("workflow_call:", workflow_text)
+        self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertIn("uses: actions/setup-python@v6", workflow_text)
         self.assertIn("repository: ${{ github.repository }}", workflow_text)
         self.assertIn("repository: kyle-consults/internal-website-monitor-engine", workflow_text)
         self.assertIn("path: _monitor_engine", workflow_text)

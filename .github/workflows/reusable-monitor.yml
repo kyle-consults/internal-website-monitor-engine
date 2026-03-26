@@ -34,19 +34,19 @@ jobs:
 
     steps:
       - name: Check out caller repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.repository }}
 
       - name: Check out monitor engine
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: kyle-consults/internal-website-monitor-engine
           ref: main
           path: _monitor_engine
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
