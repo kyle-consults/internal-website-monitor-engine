@@ -13,6 +13,7 @@ from website_monitor.notify import (
     build_email_subject,
     build_email_text,
     build_resend_payload,
+    build_resend_request,
     parse_recipients,
     send_notification,
     should_send_email,
@@ -83,6 +84,14 @@ class NotificationCoreTests(unittest.TestCase):
         self.assertEqual(payload["to"], ["one@example.com", "two@example.com"])
         self.assertIn("Changes detected", payload["subject"])
         self.assertIn("# Website Change Report", payload["text"])
+
+    def test_build_resend_request_includes_user_agent_header(self) -> None:
+        request = build_resend_request(
+            api_key="test-key",
+            payload={"subject": "Hello"},
+        )
+
+        self.assertEqual(request.get_header("User-agent"), "website-monitor-engine/0.1")
 
     def test_send_notification_skips_when_configuration_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -87,6 +87,19 @@ def build_resend_payload(
     }
 
 
+def build_resend_request(api_key: str, payload: dict[str, object]) -> Request:
+    return Request(
+        url="https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "website-monitor-engine/0.1",
+        },
+        method="POST",
+    )
+
+
 def read_summary(paths: MonitorPaths) -> dict[str, object]:
     return json.loads(paths.latest_summary.read_text(encoding="utf-8"))
 
@@ -121,15 +134,7 @@ def load_notification_settings(env: dict[str, str] | None = None) -> Notificatio
 
 
 def send_resend_email(api_key: str, payload: dict[str, object]) -> dict[str, object]:
-    request = Request(
-        url="https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    request = build_resend_request(api_key=api_key, payload=payload)
 
     try:
         with urlopen(request) as response:
