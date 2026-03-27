@@ -172,9 +172,7 @@ class MonitorRunnerIntegrationTests(unittest.TestCase):
         self.assertIn("### https://example.com/", report_text)
         self.assertIn('- Title changed: "Home" -> "Home Updated"', report_text)
         self.assertIn('- H1 changed: "Welcome" -> "Welcome Back"', report_text)
-        self.assertIn("- Text removed: Hello world", report_text)
-        self.assertIn("- Text added: Hello world.", report_text)
-        self.assertIn("- Text added: Pricing starts at $12.", report_text)
+        self.assertIn('- Text modified: "Hello world" -> "Hello world."', report_text)
         self.assertIn("- Text added: Chat with us today.", report_text)
 
     def test_unchanged_second_run_does_not_persist_new_outputs(self) -> None:

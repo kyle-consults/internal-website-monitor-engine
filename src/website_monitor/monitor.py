@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -194,12 +195,32 @@ def split_text_units(text: str) -> list[str]:
     return parts or [normalized]
 
 
-def summarize_text_changes(previous_text: str, current_text: str) -> tuple[list[str], list[str]]:
+def summarize_text_changes(previous_text: str, current_text: str) -> tuple[list[str], list[tuple[str, str]], list[str]]:
     previous_units = split_text_units(previous_text)
     current_units = split_text_units(current_text)
-    removed = [unit for unit in previous_units if unit not in current_units]
-    added = [unit for unit in current_units if unit not in previous_units]
-    return removed, added
+    removed: list[str] = []
+    modified: list[tuple[str, str]] = []
+    added: list[str] = []
+
+    matcher = SequenceMatcher(a=previous_units, b=current_units)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "delete":
+            removed.extend(previous_units[i1:i2])
+            continue
+        if tag == "insert":
+            added.extend(current_units[j1:j2])
+            continue
+
+        previous_block = previous_units[i1:i2]
+        current_block = current_units[j1:j2]
+        pair_count = min(len(previous_block), len(current_block))
+        modified.extend((previous_block[index], current_block[index]) for index in range(pair_count))
+        removed.extend(previous_block[pair_count:])
+        added.extend(current_block[pair_count:])
+
+    return removed, modified, added
 
 
 def render_page_listing(url: str, page: dict[str, object]) -> str:
@@ -234,10 +255,11 @@ def describe_page_changes(previous_page: dict[str, object], current_page: dict[s
         if current_error:
             lines.append(f"- Error added: {current_error}")
 
-    removed_text, added_text = summarize_text_changes(
+    removed_text, modified_text, added_text = summarize_text_changes(
         str(previous_page.get("text", "")),
         str(current_page.get("text", "")),
     )
+    lines.extend(f'- Text modified: "{before}" -> "{after}"' for before, after in modified_text)
     lines.extend(f"- Text removed: {item}" for item in removed_text)
     lines.extend(f"- Text added: {item}" for item in added_text)
 

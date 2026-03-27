@@ -110,8 +110,7 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertIn("### https://example.com/", report)
         self.assertIn('- Title changed: "Home" -> "Home Updated"', report)
         self.assertIn('- H1 changed: "Welcome" -> "Welcome Back"', report)
-        self.assertIn("- Text removed: Pricing starts at $9.", report)
-        self.assertIn("- Text added: Pricing starts at $12.", report)
+        self.assertIn('- Text modified: "Pricing starts at $9." -> "Pricing starts at $12."', report)
         self.assertIn("- Text added: Chat with us today.", report)
 
     def test_prune_archives_keeps_the_most_recent_files(self) -> None:
