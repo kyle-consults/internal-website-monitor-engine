@@ -54,8 +54,35 @@ def build_email_subject(summary: dict[str, object]) -> str:
     return f"[website-monitor] {prefix} for {label}"
 
 
+def truncate_all_pages_section(report: str) -> str:
+    marker_start = "## All Pages Scraped\n"
+    start = report.find(marker_start)
+    if start == -1:
+        return report
+
+    section_body_start = start + len(marker_start)
+    next_heading = report.find("\n## ", section_body_start)
+    if next_heading == -1:
+        section_end = len(report)
+    else:
+        section_end = next_heading
+
+    page_lines = [
+        line for line in report[section_body_start:section_end].splitlines() if line.startswith("- ")
+    ]
+    total = len(page_lines)
+    max_shown = 10
+    if total <= max_shown:
+        return report
+
+    kept = "\n".join(page_lines[:max_shown])
+    truncated_section = f"{kept}\n- ... and {total - max_shown} more pages\n"
+    return report[:section_body_start] + truncated_section + report[section_end:]
+
+
 def build_email_text(summary: dict[str, object], report_text: str) -> str:
     counts = summary["counts"]
+    trimmed_report = truncate_all_pages_section(report_text.strip())
     lines = [
         "Website monitor result",
         "",
@@ -68,7 +95,7 @@ def build_email_text(summary: dict[str, object], report_text: str) -> str:
         "",
         "Report:",
         "",
-        report_text.strip(),
+        trimmed_report,
     ]
     return "\n".join(lines)
 

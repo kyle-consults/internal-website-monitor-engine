@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from website_monitor.monitor import (
     clean_text,
     compare_snapshots,
+    discover_links,
     extract_page_data,
     normalize_url,
     prune_archives,
@@ -279,6 +280,30 @@ class MonitorCoreTests(unittest.TestCase):
 
         self.assertEqual(diff["changed"], ["https://example.com/"])
 
+    def test_discover_links_filters_out_none_hrefs(self) -> None:
+        page = FakePageWithLinks(hrefs=["/about", None, "None", "", "/contact"])
+
+        links = discover_links(page, "https://example.com/")
+
+        self.assertIn("https://example.com/about", links)
+        self.assertIn("https://example.com/contact", links)
+        for link in links:
+            self.assertNotIn("None", link)
+
+    def test_extract_page_data_does_not_break_link_discovery(self) -> None:
+        page = FakePageWithEvaluate(
+            title="Home",
+            body_before_strip="Nav content. Main content.",
+            body_after_strip="Main content.",
+            headings=["Home"],
+        )
+
+        extract_page_data(page, "https://example.com/")
+
+        self.assertTrue(page._stripped, "evaluate() should have been called")
+        locator = page.locator("body")
+        self.assertEqual(locator.count(), 1, "body locator should still work after stripping")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -350,3 +375,23 @@ class FakePageWithEvaluate:
         if selector == "body" and self._stripped:
             return FakeLocator(text=self._body_after_strip, count=1)
         return FakeLocator(text=None, count=0)
+
+
+class FakeLinkLocator:
+    def __init__(self, hrefs: list) -> None:
+        self._hrefs = hrefs
+
+    def evaluate_all(self, expression: str) -> list:
+        return self._hrefs
+
+
+class FakePageWithLinks:
+    """Simulates a Playwright page for link discovery tests."""
+
+    def __init__(self, hrefs: list) -> None:
+        self._hrefs = hrefs
+
+    def locator(self, selector: str) -> FakeLinkLocator:
+        if selector == "a[href]":
+            return FakeLinkLocator(self._hrefs)
+        return FakeLinkLocator([])

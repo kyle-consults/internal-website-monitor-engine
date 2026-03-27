@@ -520,7 +520,7 @@ def discover_links(page, base_url: str) -> list[str]:
 
     links: list[str] = []
     for href in hrefs:
-        if not href:
+        if not href or href == "None":
             continue
         links.append(normalize_url(urljoin(base_url, href)))
     return links
@@ -563,11 +563,13 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
                     if should_skip_url(final_url, cfg, allowed_host):
                         continue
 
+                    discovered_links = discover_links(page, final_url)
+
                     page_data = extract_page_data(page, final_url)
                     page_data["status"] = response.status if response else None
                     pages[final_url] = page_data
 
-                    for discovered in discover_links(page, final_url):
+                    for discovered in discovered_links:
                         if discovered in seen or discovered in queue:
                             continue
                         if should_skip_url(discovered, cfg, allowed_host):

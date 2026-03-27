@@ -17,6 +17,7 @@ from website_monitor.notify import (
     parse_recipients,
     send_notification,
     should_send_email,
+    truncate_all_pages_section,
 )
 from website_monitor.monitor import MonitorPaths
 
@@ -192,6 +193,36 @@ class NotificationCoreTests(unittest.TestCase):
         )
         (root / "reports" / "latest-report.md").write_text("# Website Change Report", encoding="utf-8")
         return MonitorPaths.for_root(root)
+
+
+    def test_truncate_all_pages_section_shortens_long_listings(self) -> None:
+        page_lines = "\n".join(f"- https://example.com/page-{i} | status: 200 | title: Page {i}" for i in range(25))
+        report = f"# Report\n\n## All Pages Scraped\n{page_lines}\n\n## Changed\n- something"
+
+        result = truncate_all_pages_section(report)
+
+        self.assertIn("... and 15 more pages", result)
+        self.assertIn("## Changed", result)
+        self.assertNotIn("page-24", result)
+        self.assertIn("page-0", result)
+        self.assertIn("page-9", result)
+
+    def test_truncate_all_pages_section_leaves_short_listings_intact(self) -> None:
+        page_lines = "\n".join(f"- https://example.com/page-{i} | status: 200 | title: Page {i}" for i in range(5))
+        report = f"# Report\n\n## All Pages Scraped\n{page_lines}\n\n## Changed\n- something"
+
+        result = truncate_all_pages_section(report)
+
+        self.assertEqual(result, report)
+
+    def test_build_email_text_truncates_all_pages_section(self) -> None:
+        page_lines = "\n".join(f"- https://example.com/page-{i} | status: 200 | title: Page {i}" for i in range(25))
+        report = f"# Report\n\n## All Pages Scraped\n{page_lines}\n\n## Changed\n- something"
+
+        email = build_email_text(BASE_SUMMARY, report)
+
+        self.assertIn("... and 15 more pages", email)
+        self.assertNotIn("page-24", email)
 
 
 if __name__ == "__main__":
