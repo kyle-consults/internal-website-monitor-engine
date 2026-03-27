@@ -8,12 +8,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from website_monitor.monitor import (
+    clean_text,
     compare_snapshots,
     extract_page_data,
     normalize_url,
     prune_archives,
     render_report,
     resolve_runtime_root,
+    strip_boilerplate_js,
     summarize_text_changes,
     should_adopt_homepage_redirect_host,
     should_skip_url,
@@ -202,6 +204,82 @@ class MonitorCoreTests(unittest.TestCase):
         )
 
 
+    def test_strip_boilerplate_js_removes_nav_header_footer_cookie_elements(self) -> None:
+        js_snippet = strip_boilerplate_js()
+        self.assertIn("nav", js_snippet)
+        self.assertIn("header", js_snippet)
+        self.assertIn("footer", js_snippet)
+        self.assertIn("cookie", js_snippet.lower())
+
+    def test_extract_page_data_strips_boilerplate_before_extracting_text(self) -> None:
+        page = FakePageWithEvaluate(
+            title="About Us",
+            body_before_strip="Skip to content Nav links. Main content here. Footer copyright 2026.",
+            body_after_strip="Main content here.",
+            headings=["About Us"],
+        )
+
+        page_data = extract_page_data(page, "https://example.com/about")
+
+        self.assertEqual(page_data["text"], "Main content here.")
+
+    def test_clean_text_strips_skip_to_content(self) -> None:
+        self.assertEqual(clean_text("Skip to content Main content here."), "Main content here.")
+        self.assertEqual(clean_text("Skip to main Main content here."), "Main content here.")
+
+    def test_clean_text_strips_copyright_notices(self) -> None:
+        self.assertEqual(clean_text("Hello world. ©2026 Company. All Rights Reserved"), "Hello world.")
+        self.assertEqual(clean_text("Hello world. © 2025 Company. All Rights Reserved"), "Hello world.")
+
+    def test_clean_text_strips_manage_consent_text(self) -> None:
+        self.assertEqual(clean_text("Hello world. Manage consent"), "Hello world.")
+
+    def test_compare_snapshots_ignores_near_identical_pages(self) -> None:
+        previous = {
+            "pages": {
+                "https://example.com/": {
+                    "hash": "old-hash",
+                    "text": "Welcome to our clinic. We provide urgent care services for the whole family.",
+                },
+            }
+        }
+        current = {
+            "pages": {
+                "https://example.com/": {
+                    "hash": "new-hash",
+                    "text": "Welcome to our clinic. We provide urgent care services for the whole family.",
+                },
+            }
+        }
+
+        diff = compare_snapshots(previous, current)
+
+        self.assertEqual(diff["changed"], [])
+        self.assertEqual(diff["unchanged"], ["https://example.com/"])
+
+    def test_compare_snapshots_flags_pages_below_similarity_threshold(self) -> None:
+        previous = {
+            "pages": {
+                "https://example.com/": {
+                    "hash": "old-hash",
+                    "text": "Old pricing page with completely different content.",
+                },
+            }
+        }
+        current = {
+            "pages": {
+                "https://example.com/": {
+                    "hash": "new-hash",
+                    "text": "New services page that has been totally rewritten.",
+                },
+            }
+        }
+
+        diff = compare_snapshots(previous, current)
+
+        self.assertEqual(diff["changed"], ["https://example.com/"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -242,4 +320,33 @@ class FakePage:
             return FakeLocator(headings=self._headings)
         if selector in self._text_by_selector:
             return FakeLocator(text=self._text_by_selector[selector], count=1)
+        return FakeLocator(text=None, count=0)
+
+
+class FakePageWithEvaluate:
+    """Simulates a Playwright page that supports evaluate() for boilerplate stripping."""
+
+    def __init__(
+        self,
+        title: str,
+        body_before_strip: str,
+        body_after_strip: str,
+        headings: list[str],
+    ) -> None:
+        self._title = title
+        self._body_after_strip = body_after_strip
+        self._headings = headings
+        self._stripped = False
+
+    def title(self) -> str:
+        return self._title
+
+    def evaluate(self, expression: str) -> None:
+        self._stripped = True
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector == "h1":
+            return FakeLocator(headings=self._headings)
+        if selector == "body" and self._stripped:
+            return FakeLocator(text=self._body_after_strip, count=1)
         return FakeLocator(text=None, count=0)

@@ -136,6 +136,9 @@ def clean_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\b\d{1,2}:\d{2}\b", "", text)
     text = re.sub(r"\b(last updated|updated)\b[: ]+.*?$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^skip to (?:content|main|navigation)\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*©\s*\d{4}\b.*$", "", text)
+    text = re.sub(r"\s*Manage consent\s*$", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
@@ -148,6 +151,9 @@ def load_previous_snapshot(paths: MonitorPaths) -> dict[str, object] | None:
         return None
     with paths.latest_snapshot.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+SIMILARITY_THRESHOLD = 0.97
 
 
 def compare_snapshots(previous: dict[str, object] | None, current: dict[str, object]) -> dict[str, list[str]]:
@@ -166,7 +172,12 @@ def compare_snapshots(previous: dict[str, object] | None, current: dict[str, obj
         prev_hash = previous_pages[url].get("hash", "")
         curr_hash = current_pages[url].get("hash", "")
         if prev_hash != curr_hash:
-            changed.append(url)
+            prev_text = str(previous_pages[url].get("text", ""))
+            curr_text = str(current_pages[url].get("text", ""))
+            if prev_text and curr_text and similarity_score(prev_text, curr_text) >= SIMILARITY_THRESHOLD:
+                unchanged.append(url)
+            else:
+                changed.append(url)
         else:
             unchanged.append(url)
 
@@ -279,7 +290,37 @@ def describe_page_changes(previous_page: dict[str, object], current_page: dict[s
     return lines
 
 
+_BOILERPLATE_SELECTORS = [
+    "nav",
+    "header",
+    "footer",
+    "[role='banner']",
+    "[role='navigation']",
+    "[role='contentinfo']",
+    ".cookie-banner",
+    "#cookie-consent",
+    ".cookie-consent",
+    "[class*='cookie']",
+    "[id*='cookie']",
+    "[class*='consent']",
+]
+
+
+def strip_boilerplate_js() -> str:
+    selector_list = ", ".join(f"'{s}'" for s in _BOILERPLATE_SELECTORS)
+    return (
+        f"for (const sel of [{selector_list}]) {{"
+        "  document.querySelectorAll(sel).forEach(el => el.remove());"
+        "}"
+    )
+
+
 def extract_primary_text(page) -> str:
+    try:
+        page.evaluate(strip_boilerplate_js())
+    except Exception:
+        pass
+
     selectors = [
         "main article",
         "main",
