@@ -114,9 +114,9 @@ class MonitorRunnerIntegrationTests(unittest.TestCase):
             pages={
                 "https://example.com/": {
                     "url": "https://example.com/",
-                    "title": "Home",
-                    "h1": "Welcome",
-                    "text": "Hello world updated",
+                    "title": "Home Updated",
+                    "h1": "Welcome Back",
+                    "text": "Hello world. Pricing starts at $12. Chat with us today.",
                     "hash": "home-v2",
                     "status": 200,
                 },
@@ -163,11 +163,19 @@ class MonitorRunnerIntegrationTests(unittest.TestCase):
             },
         )
         self.assertIn("## Added", report_text)
-        self.assertIn("https://example.com/contact", report_text)
+        self.assertIn("- https://example.com/contact | status: 200 | title: Contact", report_text)
         self.assertIn("## Removed", report_text)
-        self.assertIn("https://example.com/pricing", report_text)
+        self.assertIn("- https://example.com/pricing | status: 200 | title: Pricing", report_text)
         self.assertIn("## Changed", report_text)
-        self.assertIn("https://example.com/ | title: Home", report_text)
+        self.assertIn("## All Pages Scraped", report_text)
+        self.assertIn("- https://example.com/ | status: 200 | title: Home Updated", report_text)
+        self.assertIn("### https://example.com/", report_text)
+        self.assertIn('- Title changed: "Home" -> "Home Updated"', report_text)
+        self.assertIn('- H1 changed: "Welcome" -> "Welcome Back"', report_text)
+        self.assertIn("- Text removed: Hello world", report_text)
+        self.assertIn("- Text added: Hello world.", report_text)
+        self.assertIn("- Text added: Pricing starts at $12.", report_text)
+        self.assertIn("- Text added: Chat with us today.", report_text)
 
     def test_unchanged_second_run_does_not_persist_new_outputs(self) -> None:
         snapshot = make_snapshot(

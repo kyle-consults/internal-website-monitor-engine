@@ -11,6 +11,7 @@ from website_monitor.monitor import (
     compare_snapshots,
     normalize_url,
     prune_archives,
+    render_report,
     resolve_runtime_root,
     should_adopt_homepage_redirect_host,
     should_skip_url,
@@ -53,6 +54,65 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertEqual(diff["removed"], ["https://example.com/pricing"])
         self.assertEqual(diff["changed"], ["https://example.com/"])
         self.assertEqual(diff["unchanged"], [])
+
+    def test_render_report_lists_all_pages_and_change_details(self) -> None:
+        previous = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-25T00:00:00+00:00",
+            "pages": {
+                "https://example.com/": {
+                    "url": "https://example.com/",
+                    "title": "Home",
+                    "h1": "Welcome",
+                    "text": "Hello world. Pricing starts at $9.",
+                    "hash": "home-v1",
+                    "status": 200,
+                },
+                "https://example.com/pricing": {
+                    "url": "https://example.com/pricing",
+                    "title": "Pricing",
+                    "h1": "Pricing",
+                    "text": "Old pricing",
+                    "hash": "pricing-v1",
+                    "status": 200,
+                },
+            },
+        }
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                "https://example.com/": {
+                    "url": "https://example.com/",
+                    "title": "Home Updated",
+                    "h1": "Welcome Back",
+                    "text": "Hello world. Pricing starts at $12. Chat with us today.",
+                    "hash": "home-v2",
+                    "status": 200,
+                },
+                "https://example.com/contact": {
+                    "url": "https://example.com/contact",
+                    "title": "Contact",
+                    "h1": "Contact",
+                    "text": "Talk to us",
+                    "hash": "contact-v1",
+                    "status": 200,
+                },
+            },
+        }
+
+        report = render_report(current, compare_snapshots(previous, current), baseline_created=False, previous=previous)
+
+        self.assertIn("## All Pages Scraped", report)
+        self.assertIn("- https://example.com/ | status: 200 | title: Home Updated", report)
+        self.assertIn("- https://example.com/contact | status: 200 | title: Contact", report)
+        self.assertIn("## Changed", report)
+        self.assertIn("### https://example.com/", report)
+        self.assertIn('- Title changed: "Home" -> "Home Updated"', report)
+        self.assertIn('- H1 changed: "Welcome" -> "Welcome Back"', report)
+        self.assertIn("- Text removed: Pricing starts at $9.", report)
+        self.assertIn("- Text added: Pricing starts at $12.", report)
+        self.assertIn("- Text added: Chat with us today.", report)
 
     def test_prune_archives_keeps_the_most_recent_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

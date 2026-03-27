@@ -185,7 +185,74 @@ def compare_snapshots(previous: dict[str, object] | None, current: dict[str, obj
     }
 
 
-def render_report(current: dict[str, object], diff: dict[str, list[str]], baseline_created: bool) -> str:
+def split_text_units(text: str) -> list[str]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return []
+
+    parts = [item.strip() for item in re.split(r"(?<=[.!?])\s+", normalized) if item.strip()]
+    return parts or [normalized]
+
+
+def summarize_text_changes(previous_text: str, current_text: str) -> tuple[list[str], list[str]]:
+    previous_units = split_text_units(previous_text)
+    current_units = split_text_units(current_text)
+    removed = [unit for unit in previous_units if unit not in current_units]
+    added = [unit for unit in current_units if unit not in previous_units]
+    return removed, added
+
+
+def render_page_listing(url: str, page: dict[str, object]) -> str:
+    status = page.get("status", "unknown")
+    title = page.get("title", "") or "(untitled)"
+    line = f"- {url} | status: {status} | title: {title}"
+
+    error = str(page.get("error", "")).strip()
+    if error:
+        line = f"{line} | error: {error}"
+
+    return line
+
+
+def describe_page_changes(previous_page: dict[str, object], current_page: dict[str, object]) -> list[str]:
+    lines: list[str] = []
+
+    if previous_page.get("title", "") != current_page.get("title", ""):
+        lines.append(f'- Title changed: "{previous_page.get("title", "")}" -> "{current_page.get("title", "")}"')
+
+    if previous_page.get("h1", "") != current_page.get("h1", ""):
+        lines.append(f'- H1 changed: "{previous_page.get("h1", "")}" -> "{current_page.get("h1", "")}"')
+
+    if previous_page.get("status") != current_page.get("status"):
+        lines.append(f'- Status changed: "{previous_page.get("status")}" -> "{current_page.get("status")}"')
+
+    previous_error = str(previous_page.get("error", "")).strip()
+    current_error = str(current_page.get("error", "")).strip()
+    if previous_error != current_error:
+        if previous_error:
+            lines.append(f"- Error removed: {previous_error}")
+        if current_error:
+            lines.append(f"- Error added: {current_error}")
+
+    removed_text, added_text = summarize_text_changes(
+        str(previous_page.get("text", "")),
+        str(current_page.get("text", "")),
+    )
+    lines.extend(f"- Text removed: {item}" for item in removed_text)
+    lines.extend(f"- Text added: {item}" for item in added_text)
+
+    if not lines:
+        lines.append("- Hash changed, but no field-level difference could be summarized.")
+
+    return lines
+
+
+def render_report(
+    current: dict[str, object],
+    diff: dict[str, list[str]],
+    baseline_created: bool,
+    previous: dict[str, object] | None = None,
+) -> str:
     scanned_at = str(current["scanned_at"])
     homepage = str(current["homepage_url"])
     pages = current["pages"]
@@ -206,29 +273,37 @@ def render_report(current: dict[str, object], diff: dict[str, list[str]], baseli
         lines.append("Initial baseline established.")
         lines.append("")
 
+    lines.append("## All Pages Scraped")
+    for url in sorted(pages.keys()):
+        lines.append(render_page_listing(url, pages[url]))
+    lines.append("")
+
     if diff["added"]:
         lines.append("## Added")
         for url in diff["added"]:
-            lines.append(f"- {url}")
+            lines.append(render_page_listing(url, pages[url]))
         lines.append("")
 
-    if diff["removed"]:
+    if diff["removed"] and previous is not None:
         lines.append("## Removed")
+        previous_pages = previous.get("pages", {})
         for url in diff["removed"]:
-            lines.append(f"- {url}")
+            lines.append(render_page_listing(url, previous_pages[url]))
         lines.append("")
 
-    if diff["changed"]:
+    if diff["changed"] and previous is not None:
         lines.append("## Changed")
+        previous_pages = previous.get("pages", {})
         for url in diff["changed"]:
-            page = pages.get(url, {})
-            lines.append(f"- {url} | title: {page.get('title', '')}")
+            lines.append(f"### {url}")
+            lines.extend(describe_page_changes(previous_pages[url], pages[url]))
+            lines.append("")
         lines.append("")
 
     if not diff["added"] and not diff["removed"] and not diff["changed"]:
         lines.append("No changes detected.")
 
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_summary(current: dict[str, object], diff: dict[str, list[str]], baseline_created: bool) -> dict[str, object]:
@@ -440,7 +515,7 @@ def run_monitor(
     current = (crawl_fn or crawl)(homepage_url, cfg)
     diff = compare_snapshots(previous, current)
     baseline_created = previous is None
-    report_text = render_report(current, diff, baseline_created)
+    report_text = render_report(current, diff, baseline_created, previous=previous)
     summary = build_summary(current, diff, baseline_created)
     keep_archives = int(cfg.get("archive_retention", 12))
     persisted = should_persist_run(diff, baseline_created)
