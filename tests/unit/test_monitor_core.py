@@ -13,6 +13,7 @@ from website_monitor.monitor import (
     prune_archives,
     render_report,
     resolve_runtime_root,
+    summarize_text_changes,
     should_adopt_homepage_redirect_host,
     should_skip_url,
 )
@@ -112,6 +113,19 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertIn('- H1 changed: "Welcome" -> "Welcome Back"', report)
         self.assertIn('- Text modified: "Pricing starts at $9." -> "Pricing starts at $12."', report)
         self.assertIn("- Text added: Chat with us today.", report)
+
+    def test_summarize_text_changes_treats_sentence_splits_as_modifications(self) -> None:
+        removed, modified, added = summarize_text_changes(
+            "Pricing starts at $9 and includes support.",
+            "Pricing starts at $12. It includes support.",
+        )
+
+        self.assertEqual(removed, [])
+        self.assertEqual(
+            modified,
+            [("Pricing starts at $9 and includes support.", "Pricing starts at $12. It includes support.")],
+        )
+        self.assertEqual(added, [])
 
     def test_prune_archives_keeps_the_most_recent_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -195,6 +195,10 @@ def split_text_units(text: str) -> list[str]:
     return parts or [normalized]
 
 
+def similarity_score(left: str, right: str) -> float:
+    return SequenceMatcher(a=left, b=right).ratio()
+
+
 def summarize_text_changes(previous_text: str, current_text: str) -> tuple[list[str], list[tuple[str, str]], list[str]]:
     previous_units = split_text_units(previous_text)
     current_units = split_text_units(current_text)
@@ -215,6 +219,12 @@ def summarize_text_changes(previous_text: str, current_text: str) -> tuple[list[
 
         previous_block = previous_units[i1:i2]
         current_block = current_units[j1:j2]
+        previous_joined = " ".join(previous_block).strip()
+        current_joined = " ".join(current_block).strip()
+        if previous_joined and current_joined and similarity_score(previous_joined, current_joined) >= 0.67:
+            modified.append((previous_joined, current_joined))
+            continue
+
         pair_count = min(len(previous_block), len(current_block))
         modified.extend((previous_block[index], current_block[index]) for index in range(pair_count))
         removed.extend(previous_block[pair_count:])
