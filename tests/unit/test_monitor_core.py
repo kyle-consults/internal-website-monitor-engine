@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from website_monitor.monitor import (
     compare_snapshots,
+    extract_page_data,
     normalize_url,
     prune_archives,
     render_report,
@@ -55,6 +56,23 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertEqual(diff["removed"], ["https://example.com/pricing"])
         self.assertEqual(diff["changed"], ["https://example.com/"])
         self.assertEqual(diff["unchanged"], [])
+
+    def test_extract_page_data_prefers_article_or_main_content_over_body_chrome(self) -> None:
+        page = FakePage(
+            title="Clinic Near Me",
+            text_by_selector={
+                "main article": "Core article content. Actual care information.",
+                "main": "Core article content. Actual care information. Recent blogs.",
+                "body": "Header links. Core article content. Actual care information. Footer links.",
+            },
+            headings=["Clinic Near Me"],
+        )
+
+        page_data = extract_page_data(page, "https://example.com/clinic-near-me")
+
+        self.assertEqual(page_data["title"], "Clinic Near Me")
+        self.assertEqual(page_data["h1"], "Clinic Near Me")
+        self.assertEqual(page_data["text"], "Core article content. Actual care information.")
 
     def test_render_report_lists_all_pages_and_change_details(self) -> None:
         previous = {
@@ -186,3 +204,42 @@ class MonitorCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeLocator:
+    def __init__(self, text: str | None = None, count: int = 0, headings: list[str] | None = None) -> None:
+        self._text = text
+        self._count = count
+        self._headings = headings or []
+
+    def count(self) -> int:
+        return self._count
+
+    @property
+    def first(self) -> "FakeLocator":
+        return self
+
+    def inner_text(self, timeout: int = 5000) -> str:
+        if self._text is None:
+            raise RuntimeError("no text")
+        return self._text
+
+    def all_inner_texts(self) -> list[str]:
+        return self._headings
+
+
+class FakePage:
+    def __init__(self, title: str, text_by_selector: dict[str, str], headings: list[str]) -> None:
+        self._title = title
+        self._text_by_selector = text_by_selector
+        self._headings = headings
+
+    def title(self) -> str:
+        return self._title
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector == "h1":
+            return FakeLocator(headings=self._headings)
+        if selector in self._text_by_selector:
+            return FakeLocator(text=self._text_by_selector[selector], count=1)
+        return FakeLocator(text=None, count=0)

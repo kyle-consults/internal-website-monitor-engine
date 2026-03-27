@@ -279,6 +279,31 @@ def describe_page_changes(previous_page: dict[str, object], current_page: dict[s
     return lines
 
 
+def extract_primary_text(page) -> str:
+    selectors = [
+        "main article",
+        "main",
+        "[role='main']",
+        "article",
+        "body",
+    ]
+
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if locator.count() == 0:
+                continue
+            text = locator.first.inner_text(timeout=5000)
+        except Exception:
+            continue
+
+        cleaned = clean_text(text)
+        if cleaned:
+            return cleaned
+
+    return ""
+
+
 def render_report(
     current: dict[str, object],
     diff: dict[str, list[str]],
@@ -430,19 +455,13 @@ def extract_page_data(page, page_url: str) -> dict[str, object]:
     except Exception:
         title = ""
 
-    body_text = ""
-    try:
-        body_text = page.locator("body").inner_text(timeout=5000)
-    except Exception:
-        body_text = ""
-
     headings: list[str] = []
     try:
         headings = page.locator("h1").all_inner_texts()
     except Exception:
         headings = []
 
-    cleaned_body = clean_text(body_text)
+    cleaned_body = extract_primary_text(page)
     return {
         "url": page_url,
         "title": clean_text(title),
