@@ -77,7 +77,7 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertEqual(page_data["h1"], "Clinic Near Me")
         self.assertEqual(page_data["text"], "Core article content. Actual care information.")
 
-    def test_render_report_lists_all_pages_and_change_details(self) -> None:
+    def test_render_report_omits_all_pages_section_and_shows_changes(self) -> None:
         previous = {
             "homepage_url": "https://example.com",
             "scanned_at": "2026-03-25T00:00:00+00:00",
@@ -125,15 +125,41 @@ class MonitorCoreTests(unittest.TestCase):
 
         report = render_report(current, compare_snapshots(previous, current), baseline_created=False, previous=previous)
 
-        self.assertIn("## All Pages Scraped", report)
-        self.assertIn("- https://example.com/ | status: 200 | title: Home Updated", report)
-        self.assertIn("- https://example.com/contact | status: 200 | title: Contact", report)
+        self.assertNotIn("## All Pages Scraped", report)
         self.assertIn("## Changed", report)
         self.assertIn("### https://example.com/", report)
         self.assertIn('- Title changed: "Home" -> "Home Updated"', report)
         self.assertIn('- H1 changed: "Welcome" -> "Welcome Back"', report)
         self.assertIn('- Text modified: "Pricing starts at $9." -> "Pricing starts at $12."', report)
         self.assertIn("- Text added: Chat with us today.", report)
+
+    def test_render_report_shows_redirected_section(self) -> None:
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                "https://example.com/new-path": {
+                    "url": "https://example.com/new-path",
+                    "title": "Page",
+                    "h1": "Page",
+                    "text": "Content.",
+                    "hash": "same-hash",
+                    "status": 200,
+                },
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "unchanged": ["https://example.com/new-path"],
+            "redirected": ["https://example.com/old-path -> https://example.com/new-path"],
+        }
+
+        report = render_report(current, diff, baseline_created=False)
+
+        self.assertIn("## Redirected", report)
+        self.assertIn("https://example.com/old-path -> https://example.com/new-path", report)
 
     def test_summarize_text_changes_treats_sentence_splits_as_modifications(self) -> None:
         removed, modified, added = summarize_text_changes(
@@ -279,6 +305,62 @@ class MonitorCoreTests(unittest.TestCase):
         diff = compare_snapshots(previous, current)
 
         self.assertEqual(diff["changed"], ["https://example.com/"])
+
+    def test_compare_snapshots_reconciles_redirect_pairs(self) -> None:
+        previous = {
+            "pages": {
+                "https://example.com/patient-services": {
+                    "hash": "services-hash",
+                    "text": "Our urgent care services.",
+                },
+                "https://example.com/about": {
+                    "hash": "about-hash",
+                    "text": "About us.",
+                },
+            }
+        }
+        current = {
+            "pages": {
+                "https://example.com/santa-clara/patient-services": {
+                    "hash": "services-hash",
+                    "text": "Our urgent care services.",
+                },
+                "https://example.com/about": {
+                    "hash": "about-hash",
+                    "text": "About us.",
+                },
+            }
+        }
+
+        diff = compare_snapshots(previous, current)
+
+        self.assertEqual(diff["added"], [])
+        self.assertEqual(diff["removed"], [])
+        self.assertIn("https://example.com/patient-services -> https://example.com/santa-clara/patient-services", diff["redirected"])
+
+    def test_compare_snapshots_keeps_genuine_adds_and_removes(self) -> None:
+        previous = {
+            "pages": {
+                "https://example.com/old-page": {
+                    "hash": "old-hash",
+                    "text": "Old content that is completely unique.",
+                },
+            }
+        }
+        current = {
+            "pages": {
+                "https://example.com/new-page": {
+                    "hash": "new-hash",
+                    "text": "New content that is completely different.",
+                },
+            }
+        }
+
+        diff = compare_snapshots(previous, current)
+
+        self.assertEqual(diff["added"], ["https://example.com/new-page"])
+        self.assertEqual(diff["removed"], ["https://example.com/old-page"])
+        self.assertEqual(diff["redirected"], [])
 
     def test_discover_links_filters_out_none_hrefs(self) -> None:
         page = FakePageWithLinks(hrefs=["/about", None, "None", "", "/contact"])

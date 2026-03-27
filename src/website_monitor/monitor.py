@@ -156,6 +156,35 @@ def load_previous_snapshot(paths: MonitorPaths) -> dict[str, object] | None:
 SIMILARITY_THRESHOLD = 0.97
 
 
+def reconcile_redirects(
+    added: list[str],
+    removed: list[str],
+    previous_pages: dict,
+    current_pages: dict,
+) -> tuple[list[str], list[str], list[str]]:
+    removed_by_hash: dict[str, str] = {}
+    for url in removed:
+        h = previous_pages[url].get("hash", "")
+        if h:
+            removed_by_hash[h] = url
+
+    final_added: list[str] = []
+    redirected: list[str] = []
+    matched_removed: set[str] = set()
+
+    for url in added:
+        h = current_pages[url].get("hash", "")
+        if h and h in removed_by_hash:
+            old_url = removed_by_hash.pop(h)
+            matched_removed.add(old_url)
+            redirected.append(f"{old_url} -> {url}")
+        else:
+            final_added.append(url)
+
+    final_removed = [url for url in removed if url not in matched_removed]
+    return final_added, final_removed, redirected
+
+
 def compare_snapshots(previous: dict[str, object] | None, current: dict[str, object]) -> dict[str, list[str]]:
     previous_pages = previous.get("pages", {}) if previous else {}
     current_pages = current.get("pages", {})
@@ -163,8 +192,8 @@ def compare_snapshots(previous: dict[str, object] | None, current: dict[str, obj
     prev_urls = set(previous_pages.keys())
     curr_urls = set(current_pages.keys())
 
-    added = sorted(curr_urls - prev_urls)
-    removed = sorted(prev_urls - curr_urls)
+    raw_added = sorted(curr_urls - prev_urls)
+    raw_removed = sorted(prev_urls - curr_urls)
     changed: list[str] = []
     unchanged: list[str] = []
 
@@ -187,13 +216,19 @@ def compare_snapshots(previous: dict[str, object] | None, current: dict[str, obj
             "removed": [],
             "changed": [],
             "unchanged": [],
+            "redirected": [],
         }
+
+    added, removed, redirected = reconcile_redirects(
+        raw_added, raw_removed, previous_pages, current_pages,
+    )
 
     return {
         "added": added,
         "removed": removed,
         "changed": changed,
         "unchanged": unchanged,
+        "redirected": redirected,
     }
 
 
@@ -371,10 +406,11 @@ def render_report(
         lines.append("Initial baseline established.")
         lines.append("")
 
-    lines.append("## All Pages Scraped")
-    for url in sorted(pages.keys()):
-        lines.append(render_page_listing(url, pages[url]))
-    lines.append("")
+    if diff.get("redirected"):
+        lines.append("## Redirected")
+        for entry in diff["redirected"]:
+            lines.append(f"- {entry}")
+        lines.append("")
 
     if diff["added"]:
         lines.append("## Added")
