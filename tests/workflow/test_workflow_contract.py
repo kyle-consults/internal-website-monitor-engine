@@ -17,6 +17,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("on:", workflow_text)
         self.assertIn("workflow_call:", workflow_text)
         self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertIn("fetch-depth: 0", workflow_text)
+        self.assertIn("ref: ${{ github.ref_name }}", workflow_text)
         self.assertIn("uses: actions/setup-python@v6", workflow_text)
         self.assertIn("repository: ${{ github.repository }}", workflow_text)
         self.assertIn("repository: kyle-consults/internal-website-monitor-engine", workflow_text)
@@ -50,6 +52,8 @@ class WorkflowContractTests(unittest.TestCase):
             workflow_text.index("- name: Commit updated outputs"),
             workflow_text.index("- name: Send email notification"),
         )
+        self.assertIn('git pull --rebase origin "${GITHUB_REF_NAME}"', workflow_text)
+        self.assertIn('git push origin HEAD:"${GITHUB_REF_NAME}"', workflow_text)
 
     def test_missing_homepage_url_fails_fast(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
