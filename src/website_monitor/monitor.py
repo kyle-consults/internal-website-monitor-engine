@@ -666,6 +666,16 @@ def run_monitor(
     current = (crawl_fn or crawl)(homepage_url, cfg)
     diff = compare_snapshots(previous, current)
     baseline_created = previous is None
+    changes_detected = bool(diff["added"] or diff["removed"] or diff["changed"])
+    if changes_detected and not baseline_created:
+        changed_count = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"])
+        total_count = len(current.get("pages", {}))
+        if changed_count > total_count * 0.5:
+            print(
+                f"Note: {changed_count}/{total_count} pages changed. "
+                "If you recently updated the monitor engine, this is expected "
+                "on the first scan and will resolve on the next run."
+            )
     report_text = render_report(current, diff, baseline_created, previous=previous)
     summary = build_summary(current, diff, baseline_created)
     keep_archives = int(cfg.get("archive_retention", 12))
