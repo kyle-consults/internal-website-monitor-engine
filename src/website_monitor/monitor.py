@@ -618,6 +618,8 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
                     if should_skip_url(final_url, cfg, allowed_host):
                         continue
 
+                    wait_for_content_stable(page)
+
                     discovered_links = discover_links(page, final_url)
 
                     page_data = extract_page_data(page, final_url)
