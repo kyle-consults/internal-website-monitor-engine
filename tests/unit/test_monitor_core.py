@@ -20,6 +20,7 @@ from website_monitor.monitor import (
     summarize_text_changes,
     should_adopt_homepage_redirect_host,
     should_skip_url,
+    wait_for_content_stable,
 )
 
 
@@ -386,6 +387,59 @@ class MonitorCoreTests(unittest.TestCase):
         locator = page.locator("body")
         self.assertEqual(locator.count(), 1, "body locator should still work after stripping")
 
+    def test_wait_for_content_stable_returns_when_text_matches(self) -> None:
+        page = FakeStabilityPage(responses=["Hello world", "Hello world"])
+
+        wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
+
+        self.assertEqual(page.call_count, 2)
+
+    def test_wait_for_content_stable_waits_for_changing_content(self) -> None:
+        page = FakeStabilityPage(responses=["Loading...", "Partial content", "Full content", "Full content"])
+
+        wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
+
+        self.assertEqual(page.call_count, 4)
+
+    def test_wait_for_content_stable_returns_after_timeout(self) -> None:
+        call_counter = {"n": 0}
+
+        class NeverStablePage:
+            def evaluate(self, expression: str) -> str:
+                call_counter["n"] += 1
+                return f"text-{call_counter['n']}"
+
+        page = NeverStablePage()
+
+        import time as _time
+        start = _time.monotonic()
+        wait_for_content_stable(page, timeout_ms=500, interval_ms=100)
+        elapsed = _time.monotonic() - start
+
+        self.assertGreaterEqual(elapsed, 0.4)
+        self.assertLess(elapsed, 2.0)
+
+    def test_wait_for_content_stable_handles_empty_body(self) -> None:
+        page = FakeStabilityPage(responses=["", ""])
+
+        wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
+
+        self.assertEqual(page.call_count, 2)
+
+    def test_wait_for_content_stable_handles_exception_on_first_call(self) -> None:
+        page = FakeStabilityPage(responses=[RuntimeError("page closed")])
+
+        wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
+
+        self.assertEqual(page.call_count, 1)
+
+    def test_wait_for_content_stable_handles_mid_loop_exception(self) -> None:
+        page = FakeStabilityPage(responses=["Hello world", RuntimeError("context destroyed")])
+
+        wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
+
+        self.assertEqual(page.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -477,3 +531,20 @@ class FakePageWithLinks:
         if selector == "a[href]":
             return FakeLinkLocator(self._hrefs)
         return FakeLinkLocator([])
+
+
+class FakeStabilityPage:
+    """Simulates a Playwright page for stability check tests."""
+
+    def __init__(self, responses: list[str | Exception]) -> None:
+        self._responses = responses
+        self.call_count = 0
+
+    def evaluate(self, expression: str) -> str:
+        if self.call_count >= len(self._responses):
+            return self._responses[-1] if self._responses else ""
+        result = self._responses[self.call_count]
+        self.call_count += 1
+        if isinstance(result, Exception):
+            raise result
+        return result

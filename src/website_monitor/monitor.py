@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from difflib import SequenceMatcher
 from collections import deque
 from dataclasses import dataclass
@@ -523,6 +524,24 @@ def persist_outputs(
     prune_archives(paths.snapshots_dir, "snapshot-*.json", keep_archives)
     prune_archives(paths.reports_dir, "report-*.md", keep_archives)
     prune_archives(paths.reports_dir, "summary-*.json", keep_archives)
+
+
+def wait_for_content_stable(page, timeout_ms: int = 3000, interval_ms: int = 500) -> None:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    interval_s = interval_ms / 1000.0
+    try:
+        previous_text = page.evaluate("() => document.body?.innerText || ''")
+    except Exception:
+        return
+    while time.monotonic() < deadline:
+        time.sleep(interval_s)
+        try:
+            current_text = page.evaluate("() => document.body?.innerText || ''")
+        except Exception:
+            return
+        if current_text == previous_text:
+            return
+        previous_text = current_text
 
 
 def extract_page_data(page, page_url: str) -> dict[str, object]:
