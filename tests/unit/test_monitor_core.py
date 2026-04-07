@@ -529,6 +529,189 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertIn("## Flapped (auto-dismissed)", report)
         self.assertIn(f"- {url}", report)
 
+    def test_render_report_tags_large_diff_as_to_review(self) -> None:
+        url = "https://example.com/about"
+        big_old = "Lorem ipsum dolor sit amet. " * 30
+        big_new = "Consectetur adipiscing elit. " * 30
+        previous = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-25T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": big_old,
+                    "hash": "old",
+                    "status": 200,
+                }
+            },
+        }
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": big_new,
+                    "hash": "new",
+                    "status": 200,
+                }
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [url],
+            "unchanged": [],
+            "redirected": [],
+            "flapped": [],
+            "unstable": [],
+        }
+
+        report = render_report(current, diff, baseline_created=False, previous=previous)
+
+        self.assertIn(f"### {url} (TO REVIEW)", report)
+
+    def test_render_report_does_not_tag_small_diff_as_to_review(self) -> None:
+        url = "https://example.com/about"
+        previous = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-25T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "small old",
+                    "hash": "old",
+                    "status": 200,
+                }
+            },
+        }
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "small new",
+                    "hash": "new",
+                    "status": 200,
+                }
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [url],
+            "unchanged": [],
+            "redirected": [],
+            "flapped": [],
+            "unstable": [],
+        }
+
+        report = render_report(current, diff, baseline_created=False, previous=previous)
+
+        self.assertNotIn("(TO REVIEW)", report)
+        self.assertIn(f"### {url}", report)
+
+    def test_render_report_combines_unstable_and_to_review_tags(self) -> None:
+        url = "https://example.com/about"
+        big_old = "Lorem ipsum dolor sit amet. " * 30
+        big_new = "Consectetur adipiscing elit. " * 30
+        previous = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-25T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": big_old,
+                    "hash": "old",
+                    "status": 200,
+                }
+            },
+        }
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": big_new,
+                    "hash": "new",
+                    "status": 200,
+                }
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [url],
+            "unchanged": [],
+            "redirected": [],
+            "flapped": [],
+            "unstable": [url],
+        }
+
+        report = render_report(current, diff, baseline_created=False, previous=previous)
+
+        self.assertIn(f"### {url} (unstable, TO REVIEW)", report)
+
+    def test_render_report_respects_custom_review_threshold(self) -> None:
+        url = "https://example.com/about"
+        previous = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-25T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "old text here",
+                    "hash": "old",
+                    "status": 200,
+                }
+            },
+        }
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "new text here",
+                    "hash": "new",
+                    "status": 200,
+                }
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [url],
+            "unchanged": [],
+            "redirected": [],
+            "flapped": [],
+            "unstable": [],
+        }
+
+        report = render_report(
+            current, diff, baseline_created=False, previous=previous, review_threshold_chars=10
+        )
+
+        self.assertIn(f"### {url} (TO REVIEW)", report)
+
     def test_render_report_tags_unstable_page_under_changed(self) -> None:
         url = "https://example.com/about"
         previous = {

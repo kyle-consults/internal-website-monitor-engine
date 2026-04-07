@@ -458,11 +458,27 @@ def extract_primary_text(page) -> str:
     return ""
 
 
+def diff_size_chars(previous_page: dict[str, object], current_page: dict[str, object]) -> int:
+    """Sum of character lengths across all changed text content for a page.
+
+    Used to flag pages with unusually large diffs as worth a manual look.
+    """
+    removed, modified, added = summarize_text_changes(
+        str(previous_page.get("text", "")),
+        str(current_page.get("text", "")),
+    )
+    total = sum(len(item) for item in removed)
+    total += sum(len(before) + len(after) for before, after in modified)
+    total += sum(len(item) for item in added)
+    return total
+
+
 def render_report(
     current: dict[str, object],
     diff: dict[str, list[str]],
     baseline_created: bool,
     previous: dict[str, object] | None = None,
+    review_threshold_chars: int = 500,
 ) -> str:
     scanned_at = str(current["scanned_at"])
     homepage = str(current["homepage_url"])
@@ -508,8 +524,13 @@ def render_report(
         previous_pages = previous.get("pages", {})
         unstable_set = set(diff.get("unstable", []))
         for url in diff["changed"]:
-            header = f"### {url} (unstable)" if url in unstable_set else f"### {url}"
-            lines.append(header)
+            tags: list[str] = []
+            if url in unstable_set:
+                tags.append("unstable")
+            if diff_size_chars(previous_pages[url], pages[url]) >= review_threshold_chars:
+                tags.append("TO REVIEW")
+            suffix = f" ({', '.join(tags)})" if tags else ""
+            lines.append(f"### {url}{suffix}")
             lines.extend(describe_page_changes(previous_pages[url], pages[url]))
             lines.append("")
         lines.append("")
@@ -856,7 +877,14 @@ def run_monitor(
                 "If you recently updated the monitor engine, this is expected "
                 "on the first scan and will resolve on the next run."
             )
-    report_text = render_report(current, diff, baseline_created, previous=previous)
+    review_threshold = int(cfg.get("review_threshold_chars", 500))
+    report_text = render_report(
+        current,
+        diff,
+        baseline_created,
+        previous=previous,
+        review_threshold_chars=review_threshold,
+    )
     summary = build_summary(current, diff, baseline_created)
     keep_archives = int(cfg.get("archive_retention", 12))
     persisted = should_persist_run(diff, baseline_created)
