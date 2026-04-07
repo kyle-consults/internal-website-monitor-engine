@@ -47,6 +47,7 @@ class MonitorPaths:
 
 SnapshotDict = dict[str, object]
 CrawlFunction = Callable[[str, dict[str, object]], SnapshotDict]
+VerifyFunction = Callable[[list[str], dict[str, object]], dict[str, dict[str, object]]]
 
 
 def load_config(paths: MonitorPaths) -> dict[str, object]:
@@ -231,6 +232,60 @@ def compare_snapshots(previous: dict[str, object] | None, current: dict[str, obj
         "unchanged": unchanged,
         "redirected": redirected,
     }
+
+
+def reconcile_verified_changes(
+    diff: dict[str, list[str]],
+    previous: dict[str, object],
+    current: dict[str, object],
+    verified: dict[str, dict[str, object]],
+) -> dict[str, list[str]]:
+    """Re-classify changed pages using a second capture.
+
+    For each url in diff["changed"], compare the verified hash to the previous
+    and current hashes:
+      - matches previous hash -> flap, drop from changed and overwrite
+        current["pages"][url] with the previous entry so the snapshot reflects
+        the stable state.
+      - matches current hash -> confirmed change, keep in changed.
+      - matches neither -> page is unstable, keep in changed and record in
+        diff["unstable"] so the reporter can flag it.
+      - url not present in verified (re-fetch failed) -> leave unchanged.
+    """
+    previous_pages = previous.get("pages", {}) if previous else {}
+    current_pages = current.get("pages", {})
+
+    kept_changed: list[str] = []
+    flapped: list[str] = []
+    unstable: list[str] = []
+
+    for url in diff.get("changed", []):
+        verified_entry = verified.get(url)
+        if not verified_entry:
+            kept_changed.append(url)
+            continue
+
+        verified_hash = verified_entry.get("hash", "")
+        previous_entry = previous_pages.get(url, {}) if isinstance(previous_pages, dict) else {}
+        current_entry = current_pages.get(url, {}) if isinstance(current_pages, dict) else {}
+        previous_hash = previous_entry.get("hash", "") if isinstance(previous_entry, dict) else ""
+        current_hash = current_entry.get("hash", "") if isinstance(current_entry, dict) else ""
+
+        if verified_hash and verified_hash == previous_hash:
+            flapped.append(url)
+            if isinstance(current_pages, dict) and isinstance(previous_entry, dict):
+                current_pages[url] = dict(previous_entry)
+            continue
+
+        kept_changed.append(url)
+        if verified_hash and verified_hash != current_hash:
+            unstable.append(url)
+
+    result = dict(diff)
+    result["changed"] = kept_changed
+    result["flapped"] = flapped
+    result["unstable"] = unstable
+    return result
 
 
 def split_text_units(text: str) -> list[str]:
@@ -429,10 +484,22 @@ def render_report(
     if diff["changed"] and previous is not None:
         lines.append("## Changed")
         previous_pages = previous.get("pages", {})
+        unstable_set = set(diff.get("unstable", []))
         for url in diff["changed"]:
-            lines.append(f"### {url}")
+            header = f"### {url} (unstable)" if url in unstable_set else f"### {url}"
+            lines.append(header)
             lines.extend(describe_page_changes(previous_pages[url], pages[url]))
             lines.append("")
+        lines.append("")
+
+    if diff.get("flapped"):
+        lines.append("## Flapped (auto-dismissed)")
+        lines.append(
+            "These pages reported a change in the first capture but matched the "
+            "previous baseline on re-verification. Treated as noise and not persisted."
+        )
+        for url in diff["flapped"]:
+            lines.append(f"- {url}")
         lines.append("")
 
     if not diff["added"] and not diff["removed"] and not diff["changed"]:
@@ -654,10 +721,54 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
     }
 
 
+def recrawl_urls(urls: list[str], cfg: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Re-fetch the given URLs once and return fresh page data keyed by URL.
+
+    Used by run_monitor to double-capture pages that were flagged as "changed"
+    in the primary scan. Pages that fail to re-fetch are omitted from the
+    result, which the reconciler treats as "leave the original diff entry
+    alone" (fail-safe: never drop a real change on infra error).
+    """
+    if not urls:
+        return {}
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("Playwright is not installed. Install dependencies before running the scanner.") from exc
+
+    timeout_ms = int(cfg.get("request_timeout_ms", 20000))
+    verified: dict[str, dict[str, object]] = {}
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context()
+        try:
+            for url in urls:
+                page = context.new_page()
+                try:
+                    response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    wait_for_content_stable(page)
+                    final_url = normalize_url(page.url)
+                    page_data = extract_page_data(page, final_url)
+                    page_data["status"] = response.status if response else None
+                    verified[url] = page_data
+                except Exception:
+                    # Fail-safe: omit. Reconciler will preserve the original diff entry.
+                    continue
+                finally:
+                    page.close()
+        finally:
+            browser.close()
+
+    return verified
+
+
 def run_monitor(
     paths: MonitorPaths,
     env: dict[str, str] | None = None,
     crawl_fn: CrawlFunction | None = None,
+    verify_fn: VerifyFunction | None = None,
     archive_timestamp: str | None = None,
 ) -> dict[str, object]:
     cfg = load_config(paths)
@@ -666,6 +777,16 @@ def run_monitor(
     current = (crawl_fn or crawl)(homepage_url, cfg)
     diff = compare_snapshots(previous, current)
     baseline_created = previous is None
+    if not baseline_created and diff.get("changed"):
+        verify_impl = verify_fn if verify_fn is not None else recrawl_urls
+        try:
+            verified = verify_impl(list(diff["changed"]), cfg)
+        except Exception:
+            verified = {}
+        diff = reconcile_verified_changes(diff, previous or {}, current, verified)
+    else:
+        diff.setdefault("flapped", [])
+        diff.setdefault("unstable", [])
     changes_detected = bool(diff["added"] or diff["removed"] or diff["changed"])
     if changes_detected and not baseline_created:
         changed_count = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"])

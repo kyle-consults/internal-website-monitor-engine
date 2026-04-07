@@ -7,13 +7,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from website_monitor.monitor import (
+from website_monitor.monitor import (  # noqa: E402
     clean_text,
     compare_snapshots,
     discover_links,
     extract_page_data,
     normalize_url,
     prune_archives,
+    reconcile_verified_changes,
     render_report,
     resolve_runtime_root,
     strip_boilerplate_js,
@@ -439,6 +440,176 @@ class MonitorCoreTests(unittest.TestCase):
         wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
 
         self.assertEqual(page.call_count, 2)
+
+    def test_render_report_shows_flapped_section(self) -> None:
+        url = "https://example.com/about"
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "stable",
+                    "hash": "stable",
+                    "status": 200,
+                }
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "unchanged": [url],
+            "redirected": [],
+            "flapped": [url],
+            "unstable": [],
+        }
+
+        report = render_report(current, diff, baseline_created=False, previous=current)
+
+        self.assertIn("## Flapped (auto-dismissed)", report)
+        self.assertIn(f"- {url}", report)
+
+    def test_render_report_tags_unstable_page_under_changed(self) -> None:
+        url = "https://example.com/about"
+        previous = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-25T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "old",
+                    "hash": "old",
+                    "status": 200,
+                }
+            },
+        }
+        current = {
+            "homepage_url": "https://example.com",
+            "scanned_at": "2026-03-26T00:00:00+00:00",
+            "pages": {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About",
+                    "text": "new",
+                    "hash": "new",
+                    "status": 200,
+                }
+            },
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [url],
+            "unchanged": [],
+            "redirected": [],
+            "flapped": [],
+            "unstable": [url],
+        }
+
+        report = render_report(current, diff, baseline_created=False, previous=previous)
+
+        self.assertIn("### https://example.com/about (unstable)", report)
+
+    def test_reconcile_drops_flap_when_verify_matches_previous(self) -> None:
+        url = "https://example.com/page"
+        previous = {"pages": {url: {"hash": "A", "text": "alpha"}}}
+        current = {"pages": {url: {"hash": "B", "text": "beta"}}}
+        diff = {"added": [], "removed": [], "changed": [url], "unchanged": [], "redirected": []}
+        verified = {url: {"hash": "A", "text": "alpha"}}
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(result["changed"], [])
+        self.assertEqual(result["flapped"], [url])
+        self.assertEqual(result["unstable"], [])
+        self.assertEqual(current["pages"][url]["hash"], "A")
+        self.assertEqual(current["pages"][url]["text"], "alpha")
+
+    def test_reconcile_keeps_confirmed_change_when_verify_matches_current(self) -> None:
+        url = "https://example.com/page"
+        previous = {"pages": {url: {"hash": "A", "text": "alpha"}}}
+        current = {"pages": {url: {"hash": "B", "text": "beta"}}}
+        diff = {"added": [], "removed": [], "changed": [url], "unchanged": [], "redirected": []}
+        verified = {url: {"hash": "B", "text": "beta"}}
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(result["changed"], [url])
+        self.assertEqual(result["flapped"], [])
+        self.assertEqual(result["unstable"], [])
+        self.assertEqual(current["pages"][url]["hash"], "B")
+
+    def test_reconcile_flags_unstable_when_verify_matches_neither(self) -> None:
+        url = "https://example.com/page"
+        previous = {"pages": {url: {"hash": "A", "text": "alpha"}}}
+        current = {"pages": {url: {"hash": "B", "text": "beta"}}}
+        diff = {"added": [], "removed": [], "changed": [url], "unchanged": [], "redirected": []}
+        verified = {url: {"hash": "C", "text": "gamma"}}
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(result["changed"], [url])
+        self.assertEqual(result["unstable"], [url])
+        self.assertEqual(result["flapped"], [])
+
+    def test_reconcile_preserves_url_when_verify_result_missing(self) -> None:
+        url = "https://example.com/page"
+        previous = {"pages": {url: {"hash": "A"}}}
+        current = {"pages": {url: {"hash": "B"}}}
+        diff = {"added": [], "removed": [], "changed": [url], "unchanged": [], "redirected": []}
+        verified: dict[str, dict[str, object]] = {}
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(result["changed"], [url])
+        self.assertEqual(result["flapped"], [])
+        self.assertEqual(result["unstable"], [])
+
+    def test_reconcile_mixed_flap_confirmed_and_unstable(self) -> None:
+        flap = "https://example.com/flap"
+        keep = "https://example.com/keep"
+        unstable = "https://example.com/unstable"
+        previous = {
+            "pages": {
+                flap: {"hash": "A1", "text": "a1"},
+                keep: {"hash": "A2", "text": "a2"},
+                unstable: {"hash": "A3", "text": "a3"},
+            }
+        }
+        current = {
+            "pages": {
+                flap: {"hash": "B1", "text": "b1"},
+                keep: {"hash": "B2", "text": "b2"},
+                unstable: {"hash": "B3", "text": "b3"},
+            }
+        }
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [flap, keep, unstable],
+            "unchanged": [],
+            "redirected": [],
+        }
+        verified = {
+            flap: {"hash": "A1", "text": "a1"},
+            keep: {"hash": "B2", "text": "b2"},
+            unstable: {"hash": "C3", "text": "c3"},
+        }
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(sorted(result["changed"]), sorted([keep, unstable]))
+        self.assertEqual(result["flapped"], [flap])
+        self.assertEqual(result["unstable"], [unstable])
+        self.assertEqual(current["pages"][flap]["hash"], "A1")
+        self.assertEqual(current["pages"][keep]["hash"], "B2")
+        self.assertEqual(current["pages"][unstable]["hash"], "B3")
 
 
 if __name__ == "__main__":

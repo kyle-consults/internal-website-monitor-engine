@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from website_monitor.monitor import MonitorPaths, run_monitor
+from website_monitor.monitor import MonitorPaths, run_monitor  # noqa: E402
 
 
 def make_snapshot(homepage_url: str, scanned_at: str, pages: dict[str, dict]) -> dict:
@@ -222,6 +222,253 @@ class MonitorRunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(snapshot_archives, ["snapshot-2026-03-25T00-00-00Z.json"])
         self.assertEqual(report_archives, ["report-2026-03-25T00-00-00Z.md"])
         self.assertEqual(summary_archives, ["summary-2026-03-25T00-00-00Z.json"])
+
+
+    def _seed_baseline(self, pages: dict[str, dict]) -> None:
+        snapshot = make_snapshot(
+            homepage_url="https://example.com",
+            scanned_at="2026-03-25T00:00:00+00:00",
+            pages=pages,
+        )
+        run_monitor(
+            paths=self.paths,
+            env={"HOMEPAGE_URL": "https://example.com"},
+            crawl_fn=lambda homepage_url, cfg: snapshot,
+            archive_timestamp="2026-03-25T00-00-00Z",
+        )
+
+    def test_reverify_drops_flap_and_keeps_snapshot_stable(self) -> None:
+        url = "https://example.com/about"
+        self._seed_baseline(
+            {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "stable content",
+                    "hash": "stable",
+                    "status": 200,
+                }
+            }
+        )
+
+        flapped_snapshot = make_snapshot(
+            homepage_url="https://example.com",
+            scanned_at="2026-03-26T00:00:00+00:00",
+            pages={
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "flapped content",
+                    "hash": "flapped",
+                    "status": 200,
+                }
+            },
+        )
+        verify_calls: list[list[str]] = []
+
+        def verify_fn(urls: list[str], cfg: dict) -> dict[str, dict]:
+            verify_calls.append(list(urls))
+            return {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "stable content",
+                    "hash": "stable",
+                    "status": 200,
+                }
+            }
+
+        result = run_monitor(
+            paths=self.paths,
+            env={"HOMEPAGE_URL": "https://example.com"},
+            crawl_fn=lambda homepage_url, cfg: flapped_snapshot,
+            verify_fn=verify_fn,
+            archive_timestamp="2026-03-26T00-00-00Z",
+        )
+
+        self.assertEqual(verify_calls, [[url]])
+        self.assertEqual(result["diff"]["changed"], [])
+        self.assertEqual(result["diff"]["flapped"], [url])
+        self.assertEqual(result["diff"]["unstable"], [])
+        self.assertFalse(result["persisted"])
+        persisted_snapshot = json.loads(self.paths.latest_snapshot.read_text(encoding="utf-8"))
+        self.assertEqual(persisted_snapshot["pages"][url]["hash"], "stable")
+
+    def test_reverify_confirms_real_change(self) -> None:
+        url = "https://example.com/about"
+        self._seed_baseline(
+            {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "old content",
+                    "hash": "old",
+                    "status": 200,
+                }
+            }
+        )
+
+        updated_snapshot = make_snapshot(
+            homepage_url="https://example.com",
+            scanned_at="2026-03-26T00:00:00+00:00",
+            pages={
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "new content",
+                    "hash": "new",
+                    "status": 200,
+                }
+            },
+        )
+
+        def verify_fn(urls: list[str], cfg: dict) -> dict[str, dict]:
+            return {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "new content",
+                    "hash": "new",
+                    "status": 200,
+                }
+            }
+
+        result = run_monitor(
+            paths=self.paths,
+            env={"HOMEPAGE_URL": "https://example.com"},
+            crawl_fn=lambda homepage_url, cfg: updated_snapshot,
+            verify_fn=verify_fn,
+            archive_timestamp="2026-03-26T00-00-00Z",
+        )
+
+        self.assertEqual(result["diff"]["changed"], [url])
+        self.assertEqual(result["diff"]["flapped"], [])
+        self.assertEqual(result["diff"]["unstable"], [])
+        self.assertTrue(result["persisted"])
+
+    def test_reverify_flags_unstable_when_third_capture_differs(self) -> None:
+        url = "https://example.com/about"
+        self._seed_baseline(
+            {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "old",
+                    "hash": "A",
+                    "status": 200,
+                }
+            }
+        )
+
+        second_snapshot = make_snapshot(
+            homepage_url="https://example.com",
+            scanned_at="2026-03-26T00:00:00+00:00",
+            pages={
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "mid",
+                    "hash": "B",
+                    "status": 200,
+                }
+            },
+        )
+
+        def verify_fn(urls: list[str], cfg: dict) -> dict[str, dict]:
+            return {
+                url: {
+                    "url": url,
+                    "title": "About",
+                    "h1": "About us",
+                    "text": "newer",
+                    "hash": "C",
+                    "status": 200,
+                }
+            }
+
+        result = run_monitor(
+            paths=self.paths,
+            env={"HOMEPAGE_URL": "https://example.com"},
+            crawl_fn=lambda homepage_url, cfg: second_snapshot,
+            verify_fn=verify_fn,
+            archive_timestamp="2026-03-26T00-00-00Z",
+        )
+
+        self.assertEqual(result["diff"]["changed"], [url])
+        self.assertEqual(result["diff"]["unstable"], [url])
+
+    def test_verify_fn_not_called_on_baseline_run(self) -> None:
+        verify_calls: list[list[str]] = []
+
+        def verify_fn(urls: list[str], cfg: dict) -> dict[str, dict]:
+            verify_calls.append(list(urls))
+            return {}
+
+        snapshot = make_snapshot(
+            homepage_url="https://example.com",
+            scanned_at="2026-03-25T00:00:00+00:00",
+            pages={
+                "https://example.com/": {
+                    "url": "https://example.com/",
+                    "title": "Home",
+                    "h1": "Welcome",
+                    "text": "hi",
+                    "hash": "home",
+                    "status": 200,
+                }
+            },
+        )
+
+        run_monitor(
+            paths=self.paths,
+            env={"HOMEPAGE_URL": "https://example.com"},
+            crawl_fn=lambda homepage_url, cfg: snapshot,
+            verify_fn=verify_fn,
+            archive_timestamp="2026-03-25T00-00-00Z",
+        )
+
+        self.assertEqual(verify_calls, [])
+
+    def test_verify_fn_not_called_when_no_changed_pages(self) -> None:
+        snapshot_pages = {
+            "https://example.com/": {
+                "url": "https://example.com/",
+                "title": "Home",
+                "h1": "Welcome",
+                "text": "hi",
+                "hash": "home",
+                "status": 200,
+            }
+        }
+        self._seed_baseline(snapshot_pages)
+
+        verify_calls: list[list[str]] = []
+
+        def verify_fn(urls: list[str], cfg: dict) -> dict[str, dict]:
+            verify_calls.append(list(urls))
+            return {}
+
+        run_monitor(
+            paths=self.paths,
+            env={"HOMEPAGE_URL": "https://example.com"},
+            crawl_fn=lambda homepage_url, cfg: make_snapshot(
+                homepage_url="https://example.com",
+                scanned_at="2026-03-26T00:00:00+00:00",
+                pages=snapshot_pages,
+            ),
+            verify_fn=verify_fn,
+            archive_timestamp="2026-03-26T00-00-00Z",
+        )
+
+        self.assertEqual(verify_calls, [])
 
 
 if __name__ == "__main__":
