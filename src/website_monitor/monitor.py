@@ -258,16 +258,33 @@ def reconcile_verified_changes(
     kept_changed: list[str] = []
     flapped: list[str] = []
     unstable: list[str] = []
+    extraction_failed: list[str] = []
+
+    # A page is treated as extraction_failed when the new capture text is
+    # empty but the previous capture had substantial content. Empty extraction
+    # is almost always a scraper failure (selector mismatch, timeout) rather
+    # than a real "page deleted all its content" event. We restore the
+    # previous snapshot so the next scan can try again on a clean baseline.
+    extraction_min_previous_chars = 100
 
     for url in diff.get("changed", []):
+        previous_entry = previous_pages.get(url, {}) if isinstance(previous_pages, dict) else {}
+        current_entry = current_pages.get(url, {}) if isinstance(current_pages, dict) else {}
+        previous_text = str(previous_entry.get("text", "")) if isinstance(previous_entry, dict) else ""
+        current_text = str(current_entry.get("text", "")) if isinstance(current_entry, dict) else ""
+
+        if not current_text and len(previous_text) >= extraction_min_previous_chars:
+            extraction_failed.append(url)
+            if isinstance(current_pages, dict) and isinstance(previous_entry, dict):
+                current_pages[url] = dict(previous_entry)
+            continue
+
         verified_entry = verified.get(url)
         if not verified_entry:
             kept_changed.append(url)
             continue
 
         verified_hash = verified_entry.get("hash", "")
-        previous_entry = previous_pages.get(url, {}) if isinstance(previous_pages, dict) else {}
-        current_entry = current_pages.get(url, {}) if isinstance(current_pages, dict) else {}
         previous_hash = previous_entry.get("hash", "") if isinstance(previous_entry, dict) else ""
         current_hash = current_entry.get("hash", "") if isinstance(current_entry, dict) else ""
 
@@ -285,6 +302,7 @@ def reconcile_verified_changes(
     result["changed"] = kept_changed
     result["flapped"] = flapped
     result["unstable"] = unstable
+    result["extraction_failed"] = extraction_failed
     return result
 
 
@@ -429,33 +447,50 @@ def extract_primary_text(page) -> str:
     except Exception:
         pass
 
-    # Body is intentionally excluded. Falling back to body captures menus,
-    # sidebars, and footers that the boilerplate strip cannot reliably remove
-    # on every site, which is the primary source of flap noise. If none of the
-    # main-content selectors match, we return empty text and let the
-    # double-capture verifier in run_monitor decide whether to surface a real
-    # change.
-    selectors = [
+    # Two-stage extraction:
+    # 1. Walk the semantic main-content chain. The first selector with count>0
+    #    wins. Fall through ONLY when a selector has zero matches (structural
+    #    miss). If a selector matches but inner_text raises (race condition,
+    #    timeout), return empty without falling through - the verifier will
+    #    catch this case.
+    # 2. If no semantic selector matched anywhere, fall back to body. This is
+    #    safe for non-semantic pages (legal pages, WordPress page templates
+    #    without <main>) because the absence of <main> is structural, not
+    #    racy. The boilerplate strip removes nav/sidebar/widget patterns
+    #    before we get here.
+    semantic_selectors = [
         "main article",
         "main",
         "[role='main']",
         "article",
     ]
 
-    for selector in selectors:
+    for selector in semantic_selectors:
         try:
             locator = page.locator(selector)
-            if locator.count() == 0:
-                continue
-            text = locator.first.inner_text(timeout=5000)
+            count = locator.count()
         except Exception:
             continue
 
-        cleaned = clean_text(text)
-        if cleaned:
-            return cleaned
+        if count == 0:
+            continue
 
-    return ""
+        try:
+            text = locator.first.inner_text(timeout=5000)
+        except Exception:
+            return ""
+
+        return clean_text(text)
+
+    try:
+        body_locator = page.locator("body")
+        if body_locator.count() == 0:
+            return ""
+        body_text = body_locator.first.inner_text(timeout=5000)
+    except Exception:
+        return ""
+
+    return clean_text(body_text)
 
 
 def diff_size_chars(previous_page: dict[str, object], current_page: dict[str, object]) -> int:
@@ -542,6 +577,19 @@ def render_report(
             "previous baseline on re-verification. Treated as noise and not persisted."
         )
         for url in diff["flapped"]:
+            lines.append(f"- {url}")
+        lines.append("")
+
+    if diff.get("extraction_failed"):
+        lines.append("## Extraction Failed (kept previous snapshot)")
+        lines.append(
+            "These pages had substantial content in the previous baseline but "
+            "the new capture returned empty text. This is almost always a "
+            "scraper failure (selector mismatch, timeout) rather than a real "
+            "content removal. The previous snapshot has been kept and the next "
+            "scan will retry."
+        )
+        for url in diff["extraction_failed"]:
             lines.append(f"- {url}")
         lines.append("")
 
@@ -867,6 +915,7 @@ def run_monitor(
     else:
         diff.setdefault("flapped", [])
         diff.setdefault("unstable", [])
+        diff.setdefault("extraction_failed", [])
     changes_detected = bool(diff["added"] or diff["removed"] or diff["changed"])
     if changes_detected and not baseline_created:
         changed_count = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"])

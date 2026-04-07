@@ -471,16 +471,29 @@ class MonitorCoreTests(unittest.TestCase):
 
         self.assertEqual(page.call_count, 2)
 
-    def test_extract_page_data_returns_empty_text_when_no_main_content_selector_matches(self) -> None:
+    def test_extract_page_data_falls_back_to_body_when_no_semantic_selector_matches(self) -> None:
         page = FakePage(
-            title="Body Only Page",
+            title="Legal Page",
             text_by_selector={
-                "body": "Header. Some content. Footer.",
+                "body": "Terms of Use. These terms govern your use of the site.",
             },
-            headings=["Body Only Page"],
+            headings=["Legal Page"],
         )
 
-        page_data = extract_page_data(page, "https://example.com/body-only")
+        page_data = extract_page_data(page, "https://example.com/terms")
+
+        self.assertEqual(
+            page_data["text"], "Terms of Use. These terms govern your use of the site."
+        )
+
+    def test_extract_page_data_returns_empty_when_neither_semantic_nor_body_has_content(self) -> None:
+        page = FakePage(
+            title="Empty",
+            text_by_selector={},
+            headings=["Empty"],
+        )
+
+        page_data = extract_page_data(page, "https://example.com/empty")
 
         self.assertEqual(page_data["text"], "")
 
@@ -488,6 +501,7 @@ class MonitorCoreTests(unittest.TestCase):
         page = FakePage(
             title="Race Condition",
             text_by_selector={
+                "main": None,  # locator exists (count=1) but inner_text raises
                 "body": "Header. Article body. Sidebar widgets. Footer.",
             },
             headings=["Race Condition"],
@@ -495,8 +509,8 @@ class MonitorCoreTests(unittest.TestCase):
 
         page_data = extract_page_data(page, "https://example.com/race")
 
-        self.assertNotIn("Sidebar widgets", page_data["text"])
         self.assertEqual(page_data["text"], "")
+        self.assertNotIn("Sidebar widgets", str(page_data["text"]))
 
     def test_render_report_shows_flapped_section(self) -> None:
         url = "https://example.com/about"
@@ -755,6 +769,33 @@ class MonitorCoreTests(unittest.TestCase):
         report = render_report(current, diff, baseline_created=False, previous=previous)
 
         self.assertIn("### https://example.com/about (unstable)", report)
+
+    def test_reconcile_treats_empty_current_with_substantial_previous_as_extraction_failure(self) -> None:
+        url = "https://example.com/terms"
+        substantial = "These terms govern your use of the website. " * 10
+        previous = {"pages": {url: {"hash": "A", "text": substantial}}}
+        current = {"pages": {url: {"hash": "B", "text": ""}}}
+        diff = {"added": [], "removed": [], "changed": [url], "unchanged": [], "redirected": []}
+        verified = {url: {"hash": "B", "text": ""}}
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(result["changed"], [])
+        self.assertEqual(result["extraction_failed"], [url])
+        self.assertEqual(current["pages"][url]["text"], substantial)
+        self.assertEqual(current["pages"][url]["hash"], "A")
+
+    def test_reconcile_does_not_flag_extraction_failure_when_previous_was_also_short(self) -> None:
+        url = "https://example.com/empty"
+        previous = {"pages": {url: {"hash": "A", "text": "tiny"}}}
+        current = {"pages": {url: {"hash": "B", "text": ""}}}
+        diff = {"added": [], "removed": [], "changed": [url], "unchanged": [], "redirected": []}
+        verified = {url: {"hash": "B", "text": ""}}
+
+        result = reconcile_verified_changes(diff, previous, current, verified)
+
+        self.assertEqual(result["changed"], [url])
+        self.assertEqual(result["extraction_failed"], [])
 
     def test_reconcile_drops_flap_when_verify_matches_previous(self) -> None:
         url = "https://example.com/page"
