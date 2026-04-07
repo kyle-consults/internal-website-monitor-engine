@@ -240,6 +240,14 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertIn("footer", js_snippet)
         self.assertIn("cookie", js_snippet.lower())
 
+    def test_strip_boilerplate_js_removes_wordpress_sidebar_and_widget_patterns(self) -> None:
+        js_snippet = strip_boilerplate_js().lower()
+        # aside element (WP sidebars commonly use <aside>)
+        self.assertIn("aside", js_snippet)
+        # class/id pattern matches for sidebar, widget, recent posts/blogs, related, menu
+        for pattern in ("sidebar", "widget", "recent", "related", "menu"):
+            self.assertIn(pattern, js_snippet)
+
     def test_extract_page_data_strips_boilerplate_before_extracting_text(self) -> None:
         page = FakePageWithEvaluate(
             title="About Us",
@@ -385,22 +393,44 @@ class MonitorCoreTests(unittest.TestCase):
         extract_page_data(page, "https://example.com/")
 
         self.assertTrue(page._stripped, "evaluate() should have been called")
-        locator = page.locator("body")
-        self.assertEqual(locator.count(), 1, "body locator should still work after stripping")
+        locator = page.locator("main")
+        self.assertEqual(locator.count(), 1, "main locator should still work after stripping")
 
     def test_wait_for_content_stable_returns_when_text_matches(self) -> None:
-        page = FakeStabilityPage(responses=["Hello world", "Hello world"])
+        page = FakeStabilityPage(responses=["Hello world", "Hello world", "Hello world"])
 
         wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
 
-        self.assertEqual(page.call_count, 2)
+        self.assertEqual(page.call_count, 3)
 
     def test_wait_for_content_stable_waits_for_changing_content(self) -> None:
-        page = FakeStabilityPage(responses=["Loading...", "Partial content", "Full content", "Full content"])
+        page = FakeStabilityPage(
+            responses=["Loading...", "Partial content", "Full content", "Full content", "Full content"]
+        )
 
         wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
 
-        self.assertEqual(page.call_count, 4)
+        self.assertEqual(page.call_count, 5)
+
+    def test_wait_for_content_stable_requires_three_consecutive_matches_by_default(self) -> None:
+        page = FakeStabilityPage(responses=["A", "A", "B", "A", "A", "A"])
+
+        wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
+
+        self.assertEqual(page.call_count, 6)
+
+    def test_wait_for_content_stable_uses_text_fn_when_provided(self) -> None:
+        calls: list[object] = []
+
+        def text_fn(p: object) -> str:
+            calls.append(p)
+            return "stable" if len(calls) >= 3 else f"loading-{len(calls)}"
+
+        sentinel = object()
+        wait_for_content_stable(sentinel, timeout_ms=3000, interval_ms=50, text_fn=text_fn)
+
+        self.assertGreaterEqual(len(calls), 5)
+        self.assertTrue(all(call is sentinel for call in calls))
 
     def test_wait_for_content_stable_returns_after_timeout(self) -> None:
         call_counter = {"n": 0}
@@ -421,11 +451,11 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
 
     def test_wait_for_content_stable_handles_empty_body(self) -> None:
-        page = FakeStabilityPage(responses=["", ""])
+        page = FakeStabilityPage(responses=["", "", ""])
 
         wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
 
-        self.assertEqual(page.call_count, 2)
+        self.assertEqual(page.call_count, 3)
 
     def test_wait_for_content_stable_handles_exception_on_first_call(self) -> None:
         page = FakeStabilityPage(responses=[RuntimeError("page closed")])
@@ -440,6 +470,33 @@ class MonitorCoreTests(unittest.TestCase):
         wait_for_content_stable(page, timeout_ms=3000, interval_ms=50)
 
         self.assertEqual(page.call_count, 2)
+
+    def test_extract_page_data_returns_empty_text_when_no_main_content_selector_matches(self) -> None:
+        page = FakePage(
+            title="Body Only Page",
+            text_by_selector={
+                "body": "Header. Some content. Footer.",
+            },
+            headings=["Body Only Page"],
+        )
+
+        page_data = extract_page_data(page, "https://example.com/body-only")
+
+        self.assertEqual(page_data["text"], "")
+
+    def test_extract_page_data_does_not_fall_back_to_body_when_main_inner_text_raises(self) -> None:
+        page = FakePage(
+            title="Race Condition",
+            text_by_selector={
+                "body": "Header. Article body. Sidebar widgets. Footer.",
+            },
+            headings=["Race Condition"],
+        )
+
+        page_data = extract_page_data(page, "https://example.com/race")
+
+        self.assertNotIn("Sidebar widgets", page_data["text"])
+        self.assertEqual(page_data["text"], "")
 
     def test_render_report_shows_flapped_section(self) -> None:
         url = "https://example.com/about"
@@ -679,7 +736,7 @@ class FakePageWithEvaluate:
     def locator(self, selector: str) -> FakeLocator:
         if selector == "h1":
             return FakeLocator(headings=self._headings)
-        if selector == "body" and self._stripped:
+        if selector == "main" and self._stripped:
             return FakeLocator(text=self._body_after_strip, count=1)
         return FakeLocator(text=None, count=0)
 

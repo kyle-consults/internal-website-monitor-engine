@@ -382,18 +382,35 @@ def describe_page_changes(previous_page: dict[str, object], current_page: dict[s
 
 
 _BOILERPLATE_SELECTORS = [
+    # Semantic chrome
     "nav",
     "header",
     "footer",
+    "aside",
     "[role='banner']",
     "[role='navigation']",
     "[role='contentinfo']",
+    "[role='complementary']",
+    # Cookie/consent banners
     ".cookie-banner",
     "#cookie-consent",
     ".cookie-consent",
     "[class*='cookie']",
     "[id*='cookie']",
     "[class*='consent']",
+    # WordPress / Astra / Elementor sidebar and widget patterns. These often
+    # live inside <main> on theme-heavy sites and are the primary source of
+    # capture-to-capture flap noise (recent posts, related posts, sidebar
+    # menus that lazy-load after first paint).
+    "[class*='sidebar']",
+    "[id*='sidebar']",
+    "[class*='widget']",
+    "[id*='widget']",
+    "[class*='recent']",
+    "[class*='related']",
+    "[class*='menu']",
+    "[id*='menu']",
+    "[class*='subnav']",
 ]
 
 
@@ -412,12 +429,17 @@ def extract_primary_text(page) -> str:
     except Exception:
         pass
 
+    # Body is intentionally excluded. Falling back to body captures menus,
+    # sidebars, and footers that the boilerplate strip cannot reliably remove
+    # on every site, which is the primary source of flap noise. If none of the
+    # main-content selectors match, we return empty text and let the
+    # double-capture verifier in run_monitor decide whether to surface a real
+    # change.
     selectors = [
         "main article",
         "main",
         "[role='main']",
         "article",
-        "body",
     ]
 
     for selector in selectors:
@@ -593,22 +615,59 @@ def persist_outputs(
     prune_archives(paths.reports_dir, "summary-*.json", keep_archives)
 
 
-def wait_for_content_stable(page, timeout_ms: int = 3000, interval_ms: int = 500) -> None:
+def _default_stability_text_fn(page) -> str:
+    return page.evaluate("() => document.body?.innerText || ''")
+
+
+def wait_for_content_stable(
+    page,
+    timeout_ms: int = 15000,
+    interval_ms: int = 750,
+    required_matches: int = 3,
+    text_fn: Callable[[object], str] | None = None,
+) -> None:
+    """Poll a text source until it returns the same value `required_matches`
+    times in a row, or the deadline elapses.
+
+    By default polls `document.body.innerText` so callers can stabilize a page
+    without committing to an extraction strategy. The crawler injects
+    `text_fn=extract_primary_text` so we stabilize on the *exact* text that
+    will be hashed, eliminating the case where body settles before the locked
+    main-content selector finishes rendering.
+
+    `required_matches` defaults to 3 (not 2) because lazy-loading WordPress
+    sidebars often arrive in waves with brief idle gaps; two consecutive
+    matches can false-positive on a lull between waves.
+    """
+    if required_matches < 1:
+        required_matches = 1
+    fetch = text_fn if text_fn is not None else _default_stability_text_fn
+
     deadline = time.monotonic() + timeout_ms / 1000.0
     interval_s = interval_ms / 1000.0
+
     try:
-        previous_text = page.evaluate("() => document.body?.innerText || ''")
+        last_text = fetch(page)
     except Exception:
         return
+
+    matches = 1
+    if matches >= required_matches:
+        return
+
     while time.monotonic() < deadline:
         time.sleep(interval_s)
         try:
-            current_text = page.evaluate("() => document.body?.innerText || ''")
+            current_text = fetch(page)
         except Exception:
             return
-        if current_text == previous_text:
-            return
-        previous_text = current_text
+        if current_text == last_text:
+            matches += 1
+            if matches >= required_matches:
+                return
+        else:
+            matches = 1
+            last_text = current_text
 
 
 def extract_page_data(page, page_url: str) -> dict[str, object]:
@@ -660,7 +719,7 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
     seen: set[str] = set()
     pages: dict[str, dict[str, object]] = {}
     max_pages = int(cfg.get("max_pages", 100))
-    timeout_ms = int(cfg.get("request_timeout_ms", 20000))
+    timeout_ms = int(cfg.get("request_timeout_ms", 30000))
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -677,7 +736,7 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
 
                 page = context.new_page()
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    response = page.goto(url, wait_until="load", timeout=timeout_ms)
                     final_url = normalize_url(page.url)
                     final_host = urlparse(final_url).netloc.lower()
                     if url == homepage_seed and should_adopt_homepage_redirect_host(allowed_host, final_host, len(pages)):
@@ -685,7 +744,7 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
                     if should_skip_url(final_url, cfg, allowed_host):
                         continue
 
-                    wait_for_content_stable(page)
+                    wait_for_content_stable(page, text_fn=extract_primary_text)
 
                     discovered_links = discover_links(page, final_url)
 
@@ -737,7 +796,7 @@ def recrawl_urls(urls: list[str], cfg: dict[str, object]) -> dict[str, dict[str,
     except ImportError as exc:
         raise RuntimeError("Playwright is not installed. Install dependencies before running the scanner.") from exc
 
-    timeout_ms = int(cfg.get("request_timeout_ms", 20000))
+    timeout_ms = int(cfg.get("request_timeout_ms", 30000))
     verified: dict[str, dict[str, object]] = {}
 
     with sync_playwright() as playwright:
@@ -747,8 +806,8 @@ def recrawl_urls(urls: list[str], cfg: dict[str, object]) -> dict[str, dict[str,
             for url in urls:
                 page = context.new_page()
                 try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                    wait_for_content_stable(page)
+                    response = page.goto(url, wait_until="load", timeout=timeout_ms)
+                    wait_for_content_stable(page, text_fn=extract_primary_text)
                     final_url = normalize_url(page.url)
                     page_data = extract_page_data(page, final_url)
                     page_data["status"] = response.status if response else None
