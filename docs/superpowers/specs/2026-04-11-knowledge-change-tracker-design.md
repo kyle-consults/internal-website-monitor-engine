@@ -42,6 +42,7 @@ Crawl (existing, Playwright)
 - Comparison operates on knowledge units, not text hashes
 - Report is rendered from a structured change summary, not raw text diffs
 - New dependency: `google-genai`
+- Knowledge pipeline extracted into its own orchestrator function (`run_knowledge_pipeline()`) called by `run_monitor()`, keeping the main function as a thin coordinator
 
 ### What may be removed
 
@@ -52,12 +53,13 @@ Crawl (existing, Playwright)
 
 Each crawled page's text is sent to Gemini Flash Lite to classify the page and extract knowledge.
 
-### Page Classification
+### Extraction Scope
 
-- **operational** - hours, policies, insurance, locations, contact info, services, pricing, FAQs about operations
-- **non-operational** - blog posts, news, staff bios, testimonials, marketing copy
+All pages are extracted. The LLM classifies each **knowledge unit** (not the page) as operational or non-operational. This prevents silent false negatives where operational facts (e.g., holiday closures, new insurance providers) appear on pages that would otherwise be classified as "blog" or "news."
 
-Non-operational pages are stored with their classification but no extracted knowledge. They are skipped in comparison.
+Operational unit categories include: hours, policies, insurance, locations, contact info, services, pricing, FAQs about operations.
+
+Non-operational units (marketing copy, testimonials, staff bios) are stored but skipped in comparison.
 
 ### Knowledge Unit Structure
 
@@ -91,10 +93,16 @@ Non-operational pages are stored with their classification but no extracted know
 - Labels should be concise and normalized for consistency across runs
 - Values must preserve exact wording from the page (no paraphrasing numbers, times, names)
 - Non-operational pages return empty knowledge_units
+- **Structured output mode** - use Gemini's `response_schema` to enforce the JSON schema. This is the primary defense against extraction inconsistency. The model is constrained to return valid JSON matching the schema.
+- **Prompt injection safety** - page text is untrusted data. The extraction prompt must isolate page content within clear data delimiters and instruct the model to treat it strictly as input data, not instructions.
 
 ### Model
 
 Gemini 2.0 Flash Lite. Configurable per client via `gemini_model` in `defaults.json`. Can bump to Flash or Pro if extraction quality is insufficient.
+
+### Parallelism
+
+Extraction calls run in parallel using ThreadPoolExecutor with a concurrency cap (e.g., 5-10). This keeps total run time reasonable for sites with many operational pages.
 
 ## Knowledge Comparison
 
@@ -115,11 +123,12 @@ Knowledge units are matched by composite key: `(page_url, category, label)`.
 
 The main risk is Gemini labeling the same knowledge differently across runs (e.g., "Weekday Hours" vs "Monday-Friday Hours"), causing false adds/removes.
 
-Mitigations:
+Mitigations (in priority order):
 
-1. **Fuzzy label matching** - before declaring an add+remove pair, check if any removed unit on the same page has a similar label (string similarity) and same category. If so, treat as a match and compare values.
-2. **Prompt engineering** - the extraction prompt emphasizes consistent, normalized labeling with examples.
-3. **Page-level fallback** - if a page has many apparent adds/removes but values are mostly the same, flag as "extraction inconsistency" rather than reporting false changes.
+1. **Structured output** (primary) - Gemini's `response_schema` constrains the model to return consistent JSON structure. This eliminates most structural inconsistency.
+2. **Fuzzy label matching** (secondary) - before declaring an add+remove pair, check if any removed unit on the same page has a similar label (string similarity) and same category. If so, treat as a match and compare values.
+3. **Prompt engineering** - the extraction prompt emphasizes consistent, normalized labeling with examples.
+4. **Page-level fallback** - if a page has many apparent adds/removes but values are mostly the same, flag as "extraction inconsistency" rather than reporting false changes.
 
 ### Page-Level Events
 
@@ -127,13 +136,19 @@ Mitigations:
 - New operational page: all units reported as "added"
 - Removed page: all units reported as "removed"
 
-### No Hash Gating
+### URL Redirect Reconciliation
 
-Every operational page is extracted every run. Daily frequency + Flash Lite cost makes this viable and avoids complexity of conditional extraction.
+If a page URL changes but knowledge units are identical (or nearly identical), treat as a redirect rather than a remove+add. This mirrors the existing `reconcile_redirects()` pattern in the raw-diff pipeline.
+
+### Hash-Gated Extraction
+
+If a page's raw text hash is unchanged from the previous run, reuse the prior extraction instead of re-calling Gemini. This reduces LLM nondeterminism (the biggest source of false positives) and cost. Only pages with changed content trigger a new extraction call.
+
+The hash infrastructure already exists in the raw crawl pipeline. The knowledge pipeline reads the previous knowledge snapshot and previous raw snapshot to check hashes before deciding whether to extract.
 
 ## Change Summarization & Report
 
-When changes are detected, the structured diff is sent to Gemini Flash Lite to produce a human-readable change summary.
+When changes are detected, the structured diff is rendered into a human-readable report using **deterministic templates** (no LLM call). This ensures correctness over prose and eliminates a failure/hallucination point.
 
 ### Example
 
@@ -152,24 +167,25 @@ Input diff:
 }
 ```
 
-Output report:
+Output report (template-rendered, no LLM):
 ```markdown
 ## Changes Detected - April 11, 2026
 
-### Hours Updated
+### Hours
 - **Weekday Hours** changed: was "Mon-Fri 8:00 AM - 8:00 PM",
   now "Mon-Fri 8:00 AM - 9:00 PM" (source: /hours)
 
-### Insurance Updated
-- **New accepted provider added:** Blue Cross Blue Shield (source: /insurance)
+### Insurance
+- **Accepted Provider** added: "Blue Cross Blue Shield" (source: /insurance)
 ```
 
 ### Report Structure
 
 1. Header - site, scan time, change count
 2. Change summary - LLM-generated plain-English section
-3. Extraction notes - pages flagged as inconsistent, newly classified, or failed to extract
-4. Pages scanned - count of operational vs non-operational pages
+3. Fallback: Raw Changes - separate section for pages where extraction failed, using existing raw text diff format
+4. Extraction notes - pages flagged as inconsistent, newly classified, or failed to extract
+5. Pages scanned - count of operational vs non-operational pages
 
 ### Email Behavior
 
@@ -184,6 +200,7 @@ Output report:
 
 ```json
 {
+  "schema_version": 1,
   "homepage_url": "https://myurgentcare.com",
   "extracted_at": "2026-04-11T08:00:00Z",
   "model": "gemini-2.0-flash-lite",
@@ -260,7 +277,7 @@ Added to `defaults.json`. Only two new fields. `gemini_model` allows per-client 
 
 ### New Secrets
 
-- `GEMINI_API_KEY` (required) - Google AI API key, passed as a workflow secret
+- `GEMINI_API_KEY` (optional) - Google AI API key, passed as a workflow secret. If absent, the system runs the existing raw-diff pipeline (no knowledge extraction). This ensures backwards compatibility with existing client repos.
 
 ### New Dependency
 
@@ -316,3 +333,7 @@ Same pattern as today, just with the additional secret.
 
 - Crawl, notification, and workflow contract tests remain as-is
 - Some comparison tests updated since comparison now operates on knowledge units
+
+## Rollout Strategy
+
+The `GEMINI_API_KEY` being optional provides per-client opt-in. Existing client repos continue running the raw-diff pipeline unchanged. New clients or clients that add the secret get knowledge extraction. No breaking changes to existing behavior.
