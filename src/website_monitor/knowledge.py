@@ -115,16 +115,27 @@ def extract_page_knowledge(
             ),
         )
         parsed = response.parsed
+        # parsed can be a dict (Gemini 2.5+) or a Pydantic model (older SDKs)
+        if isinstance(parsed, dict):
+            raw_units = parsed.get("knowledge_units", [])
+        else:
+            raw_units = parsed.knowledge_units
         units: list[dict[str, Any]] = []
-        for ku in parsed.knowledge_units:
-            units.append(
-                {
+        for ku in raw_units:
+            if isinstance(ku, dict):
+                units.append({
+                    "label": ku.get("label", ""),
+                    "value": ku.get("value", ""),
+                    "category": ku.get("category", ""),
+                    "operational": ku.get("operational", True),
+                })
+            else:
+                units.append({
                     "label": ku.label,
                     "value": ku.value,
                     "category": ku.category,
                     "operational": ku.operational,
-                }
-            )
+                })
         return units
     except Exception:
         logger.exception("Gemini extraction failed")
