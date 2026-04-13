@@ -156,20 +156,74 @@ def _operational_values_match(
     prev_units: list[dict[str, Any]],
     new_units: list[dict[str, Any]],
 ) -> bool:
-    """Check if two unit lists have identical operational values.
+    """Check if two unit lists have effectively identical operational content.
 
-    Returns True only if every operational unit's (category, label, value)
-    triple is the same in both lists. Any difference means the page genuinely
-    changed and the new extraction should be kept.
+    Uses a two-pass approach:
+    1. Exact match on (category, label, value) triples — if 100%, return True
+    2. For remaining unmatched units, check if values are highly similar
+       (>0.85 SequenceMatcher ratio). If all unmatched units have a similar
+       counterpart, the page is treated as stable.
+
+    This handles LLM nondeterminism where Gemini extracts slightly different
+    wording for the same fact across runs (e.g., "extended hours" vs
+    "extended hours on evenings and weekends").
     """
-    def _op_set(units: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
-        return {
-            (u.get("category", ""), u.get("label", ""), u.get("value", ""))
-            for u in units
-            if u.get("operational", True)
-        }
+    from difflib import SequenceMatcher
 
-    return _op_set(prev_units) == _op_set(new_units)
+    def _op_list(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [u for u in units if u.get("operational", True)]
+
+    prev_ops = _op_list(prev_units)
+    new_ops = _op_list(new_units)
+
+    if not prev_ops and not new_ops:
+        return True
+
+    # Pass 1: exact match
+    prev_set = {
+        (u.get("category", ""), u.get("label", ""), u.get("value", ""))
+        for u in prev_ops
+    }
+    new_set = {
+        (u.get("category", ""), u.get("label", ""), u.get("value", ""))
+        for u in new_ops
+    }
+    if prev_set == new_set:
+        return True
+
+    # Pass 2: fuzzy value match for remaining units
+    # Index by (category, label) for easy lookup
+    prev_by_key: dict[tuple[str, str], str] = {}
+    for u in prev_ops:
+        prev_by_key[(u.get("category", ""), u.get("label", ""))] = u.get("value", "")
+
+    new_by_key: dict[tuple[str, str], str] = {}
+    for u in new_ops:
+        new_by_key[(u.get("category", ""), u.get("label", ""))] = u.get("value", "")
+
+    all_keys = set(prev_by_key.keys()) | set(new_by_key.keys())
+    for key in all_keys:
+        prev_val = prev_by_key.get(key)
+        new_val = new_by_key.get(key)
+        if prev_val is None or new_val is None:
+            # Unit appeared or disappeared — check if there's a similar unit
+            # in the other set with a different label but same category
+            missing_val = prev_val if new_val is None else new_val
+            other_vals = new_by_key if new_val is None else prev_by_key
+            cat = key[0]
+            best_sim = 0.0
+            for other_key, other_val in other_vals.items():
+                if other_key[0] == cat and other_key not in (set(prev_by_key) & set(new_by_key)):
+                    sim = SequenceMatcher(a=missing_val, b=other_val).ratio()
+                    best_sim = max(best_sim, sim)
+            if best_sim < 0.85:
+                return False
+        elif prev_val != new_val:
+            sim = SequenceMatcher(a=prev_val, b=new_val).ratio()
+            if sim < 0.85:
+                return False
+
+    return True
 
 
 def extract_all_pages(
@@ -262,27 +316,32 @@ def extract_all_pages(
 # ── Change verification ─────────────────────────────────────────────────────
 
 _VERIFY_PROMPT = """\
-You are a change verification assistant. You are given a list of detected \
-knowledge changes from a website monitoring system. Some of these changes \
-are REAL (the website actually updated information) and some are NOISE \
-(the extraction interpreted the same content differently between runs).
+You are a strict change verification assistant for a website monitoring system. \
+Many websites have dynamic pages (accordions, tabs, lazy-loaded content) that \
+render differently on each visit. This causes our AI extractor to produce \
+slightly different outputs each run, even when the website content has NOT \
+actually changed. Your job is to aggressively filter this noise.
 
 For each change, classify it as "real" or "noise".
 
-A change is NOISE if:
-- The old and new values say the same thing in different words or formatting
-- The change is just capitalization, punctuation, or whitespace differences
-- A list was reordered but contains the same items
-- Content moved from one label to another but the information is the same
-- Boilerplate, navigation, or UI text was extracted inconsistently
+A change is NOISE (most changes are noise) if:
+- The old and new values convey the same information in different words
+- The change is just capitalization, punctuation, whitespace, or formatting
+- A list was extracted in a different order or with different item boundaries
+- Content was extracted with a different label but the factual content is the same
+- Generic service descriptions, marketing copy, or boilerplate changed wording
+- A section appeared or disappeared that contains general information already \
+covered elsewhere on the site (e.g., "services offered" list, FAQ answers)
+- UI/navigation text like "Search by State", "Find a location", "About Us"
 
-A change is REAL if:
-- Actual factual information changed (hours, phone numbers, addresses, prices)
-- New services, policies, or providers were genuinely added or removed
-- Contact information was updated
+A change is REAL only if ALL of these are true:
+- A specific, concrete fact changed (phone number, street address, hours of \
+operation, insurance provider name, pricing, policy with specific terms)
+- The change represents new information a customer would need to act on
+- The old and new values are factually different, not just rephrased
 
-Be conservative: when in doubt, classify as noise. Only flag changes where \
-the actual meaning or facts changed for a real customer.
+Default to NOISE. Only classify as "real" when you are confident that a \
+customer-facing fact genuinely changed. When in doubt, it is noise.
 
 Respond with a JSON array of objects, one per change, each with:
 - "index": the change number (starting from 0)
