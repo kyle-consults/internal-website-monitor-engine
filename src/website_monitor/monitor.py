@@ -959,9 +959,45 @@ def run_monitor(
     if client is not None:
         # Knowledge pipeline path
         previous_knowledge = load_previous_knowledge(paths)
+
+        # Bug 2 fix: when adding Gemini to an already-monitored site,
+        # previous_knowledge is None but previous (raw snapshot) exists.
+        # Treat this as a knowledge baseline run, not a change detection run.
+        knowledge_baseline = previous_knowledge is None and previous is not None
+        if knowledge_baseline:
+            baseline_created = True
+
         knowledge, diff, report_text, summary = run_knowledge_pipeline(
             current, cfg, client, previous, previous_knowledge, baseline_created,
         )
+
+        # Bug 1 fix: if ALL pages have empty knowledge_units but the crawl
+        # had pages with text content, the Gemini API likely failed entirely.
+        # Do not persist the empty knowledge snapshot so the next run re-extracts.
+        knowledge_pages = knowledge.get("pages", {}) if knowledge else {}
+        has_any_units = any(
+            p.get("knowledge_units") for p in knowledge_pages.values()
+        )
+        crawl_pages = current.get("pages", {})
+        has_text_content = any(
+            str(p.get("text", "")).strip() for p in crawl_pages.values()
+        )
+        if not has_any_units and has_text_content:
+            # Re-render report with extraction failure note before nullifying
+            failed_snapshot = dict(knowledge) if knowledge else dict(current)
+            knowledge = None
+            report_text = render_knowledge_report(
+                failed_snapshot,
+                diff,
+                baseline_created,
+                extraction_notes=["All knowledge extractions returned empty — possible Gemini API failure. "
+                                  "Knowledge snapshot was not persisted; next run will retry."],
+            )
+            summary = build_knowledge_summary(
+                failed_snapshot,
+                diff,
+                baseline_created,
+            )
         # Optional webhook
         webhook_url = cfg.get("webhook_url")
         if webhook_url and (diff.get("changed") or diff.get("added") or diff.get("removed")):

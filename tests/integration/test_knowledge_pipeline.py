@@ -280,5 +280,153 @@ class TestKnowledgeArchivesArePruned(unittest.TestCase):
         self.assertIn("knowledge-2026-04-05T00-00-00Z.json", archive_names)
 
 
+class TestTotalExtractionFailureDoesNotPersistKnowledge(unittest.TestCase):
+    """When all Gemini extractions fail (empty knowledge_units), knowledge
+    snapshot should NOT be persisted, but the raw snapshot should still be."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        (self.root / "config").mkdir()
+        (self.root / "reports").mkdir()
+        (self.root / "snapshots").mkdir()
+        (self.root / "config" / "defaults.json").write_text(
+            json.dumps({
+                "max_pages": 10,
+                "request_timeout_ms": 5000,
+                "archive_retention": 3,
+                "gemini_model": "gemini-2.0-flash-lite",
+            }),
+            encoding="utf-8",
+        )
+        self.paths = MonitorPaths.for_root(self.root)
+        self.env = {"HOMEPAGE_URL": HOMEPAGE}
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_total_extraction_failure_does_not_persist_knowledge(self):
+        page = {
+            "url": f"{HOMEPAGE}/",
+            "title": "Home",
+            "h1": "Welcome",
+            "text": "Our office hours are 9am to 5pm.",
+            "hash": "hash_v1",
+            "status": 200,
+        }
+        snapshot = _make_snapshot({f"{HOMEPAGE}/": page})
+
+        # All extractions fail: knowledge_units are empty for every page
+        empty_knowledge = _make_knowledge({
+            f"{HOMEPAGE}/": {
+                "url": f"{HOMEPAGE}/",
+                "knowledge_units": [],
+            }
+        })
+
+        mock_client = MagicMock()
+
+        with patch("website_monitor.monitor.extract_all_pages", return_value=empty_knowledge), \
+             patch("website_monitor.monitor.compare_knowledge", return_value={"added": [], "removed": [], "changed": [], "unchanged": []}):
+            result = run_monitor(
+                paths=self.paths,
+                env=self.env,
+                crawl_fn=lambda _url, _cfg: snapshot,
+                archive_timestamp="run1",
+                gemini_client=mock_client,
+            )
+
+        # Raw snapshot should still be persisted
+        self.assertTrue(result["persisted"])
+        self.assertTrue(self.paths.latest_snapshot.exists())
+
+        # Knowledge snapshot should NOT be persisted
+        self.assertFalse(self.paths.latest_knowledge.exists())
+
+        # Report should mention extraction failure
+        report_path = self.paths.reports_dir / "report-run1.md"
+        self.assertTrue(report_path.exists())
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("extraction", report_text.lower())
+
+
+class TestFirstKnowledgeRunOnExistingSiteCreatesBaseline(unittest.TestCase):
+    """When a site has a raw snapshot but no knowledge snapshot, the first
+    knowledge run should create a baseline, NOT report false changes."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        (self.root / "config").mkdir()
+        (self.root / "reports").mkdir()
+        (self.root / "snapshots").mkdir()
+        (self.root / "config" / "defaults.json").write_text(
+            json.dumps({
+                "max_pages": 10,
+                "request_timeout_ms": 5000,
+                "archive_retention": 3,
+                "gemini_model": "gemini-2.0-flash-lite",
+            }),
+            encoding="utf-8",
+        )
+        self.paths = MonitorPaths.for_root(self.root)
+        self.env = {"HOMEPAGE_URL": HOMEPAGE}
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_first_knowledge_run_on_existing_site_creates_baseline(self):
+        page = {
+            "url": f"{HOMEPAGE}/",
+            "title": "Home",
+            "h1": "Welcome",
+            "text": "Our office hours are 9am to 5pm.",
+            "hash": "hash_v1",
+            "status": 200,
+        }
+        snapshot = _make_snapshot({f"{HOMEPAGE}/": page})
+
+        # Pre-seed a raw snapshot (site already monitored without Gemini)
+        raw_snapshot_path = self.paths.latest_snapshot
+        raw_snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        knowledge = _make_knowledge({
+            f"{HOMEPAGE}/": {
+                "url": f"{HOMEPAGE}/",
+                "knowledge_units": [
+                    {"label": "Office Hours", "value": "9am to 5pm", "category": "operations", "operational": True},
+                ],
+            }
+        })
+
+        mock_client = MagicMock()
+
+        # compare_knowledge(None, knowledge) would normally report all units
+        # as "added", but the fix should pass baseline_created=True so the
+        # report says "Initial knowledge baseline established" instead.
+        with patch("website_monitor.monitor.extract_all_pages", return_value=knowledge), \
+             patch("website_monitor.monitor.compare_knowledge", return_value={"added": [], "removed": [], "changed": [], "unchanged": []}):
+            result = run_monitor(
+                paths=self.paths,
+                env=self.env,
+                crawl_fn=lambda _url, _cfg: snapshot,
+                archive_timestamp="run1",
+                gemini_client=mock_client,
+            )
+
+        # Should be treated as a baseline run for knowledge
+        self.assertTrue(result["baseline_created"])
+        self.assertFalse(result["summary"].get("changes_detected", False))
+
+        # Knowledge should be persisted
+        self.assertTrue(self.paths.latest_knowledge.exists())
+
+        # Report should say baseline established
+        report_path = self.paths.reports_dir / "report-run1.md"
+        self.assertTrue(report_path.exists())
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("baseline", report_text.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
