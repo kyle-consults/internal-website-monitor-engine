@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -100,18 +99,26 @@ def build_email_text(summary: dict[str, object], report_text: str) -> str:
     return "\n".join(lines)
 
 
+def _is_html(text: str) -> bool:
+    return text.strip().startswith("<!DOCTYPE html>") or text.strip().startswith("<html")
+
+
 def build_resend_payload(
     summary: dict[str, object],
     report_text: str,
     sender: str,
     recipients: list[str],
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "from": sender,
         "to": recipients,
         "subject": build_email_subject(summary),
-        "text": build_email_text(summary, report_text),
     }
+    if _is_html(report_text):
+        payload["html"] = report_text
+    else:
+        payload["text"] = build_email_text(summary, report_text)
+    return payload
 
 
 def build_resend_request(api_key: str, payload: dict[str, object]) -> Request:
