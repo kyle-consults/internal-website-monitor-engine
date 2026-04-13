@@ -8,8 +8,170 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from website_monitor.knowledge import (  # noqa: E402
     build_gemini_client,
+    extract_all_pages,
     extract_page_knowledge,
 )
+
+
+class TestExtractAllPages(unittest.TestCase):
+    """Tests for extract_all_pages (parallel extraction with hash gating)."""
+
+    def _make_extract_side_effect(
+        self, results_by_text: dict[str, list[dict]],
+    ):
+        """Return a side_effect function for extract_page_knowledge mock."""
+        def _side_effect(page_text, client, model):
+            return results_by_text.get(page_text, [])
+        return _side_effect
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_hash_gated_reuses_cache_for_unchanged(self, mock_extract: MagicMock) -> None:
+        """Unchanged pages (same hash) reuse prior knowledge; changed pages call Gemini."""
+        mock_extract.return_value = [{"fact": "New fact", "category": "info", "operational": True}]
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Home text", "hash": "aaa"},
+                "https://example.com/about": {"text": "About changed", "hash": "bbb-new"},
+            },
+        }
+        previous_snapshot = {
+            "pages": {
+                "https://example.com/": {"hash": "aaa"},
+                "https://example.com/about": {"hash": "bbb-old"},
+            },
+        }
+        previous_knowledge = {
+            "pages": {
+                "https://example.com/": {
+                    "units": [{"fact": "Cached fact", "category": "hours", "operational": True}],
+                },
+                "https://example.com/about": {
+                    "units": [{"fact": "Old about", "category": "background", "operational": False}],
+                },
+            },
+        }
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        # Home page hash unchanged → cached
+        self.assertEqual(
+            result["pages"]["https://example.com/"]["units"],
+            [{"fact": "Cached fact", "category": "hours", "operational": True}],
+        )
+        # About page hash changed → extracted
+        self.assertEqual(
+            result["pages"]["https://example.com/about"]["units"],
+            [{"fact": "New fact", "category": "info", "operational": True}],
+        )
+        # extract_page_knowledge called only for the changed page
+        mock_extract.assert_called_once_with("About changed", client, "gemini-2.0-flash-lite")
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_first_run_extracts_all(self, mock_extract: MagicMock) -> None:
+        """No previous snapshot → every page gets extracted."""
+        mock_extract.return_value = [{"fact": "A fact", "category": "info", "operational": True}]
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Home", "hash": "aaa"},
+                "https://example.com/contact": {"text": "Contact", "hash": "bbb"},
+            },
+        }
+        client = MagicMock()
+        result = extract_all_pages(crawl_result, client, "gemini-2.0-flash-lite", None, None)
+
+        self.assertEqual(mock_extract.call_count, 2)
+        self.assertIn("https://example.com/", result["pages"])
+        self.assertIn("https://example.com/contact", result["pages"])
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["homepage_url"], "https://example.com")
+        self.assertIn("extracted_at", result)
+        self.assertEqual(result["model"], "gemini-2.0-flash-lite")
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_all_extractions_fail_returns_empty_units(self, mock_extract: MagicMock) -> None:
+        """When every extraction fails, pages have empty units lists."""
+        mock_extract.return_value = []
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Home", "hash": "aaa"},
+            },
+        }
+        client = MagicMock()
+        result = extract_all_pages(crawl_result, client, "gemini-2.0-flash-lite", None, None)
+
+        self.assertEqual(result["pages"]["https://example.com/"]["units"], [])
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_new_page_not_in_previous_triggers_extraction(self, mock_extract: MagicMock) -> None:
+        """A page in the crawl but not in previous snapshot gets extracted."""
+        mock_extract.return_value = [{"fact": "Brand new", "category": "info", "operational": True}]
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/new-page": {"text": "New page text", "hash": "ccc"},
+            },
+        }
+        previous_snapshot = {"pages": {}}
+        previous_knowledge = {"pages": {}}
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        mock_extract.assert_called_once_with("New page text", client, "gemini-2.0-flash-lite")
+        self.assertEqual(
+            result["pages"]["https://example.com/new-page"]["units"],
+            [{"fact": "Brand new", "category": "info", "operational": True}],
+        )
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_removed_page_absent_from_result(self, mock_extract: MagicMock) -> None:
+        """A page in previous but not in current crawl is absent from the result."""
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Home", "hash": "aaa"},
+            },
+        }
+        previous_snapshot = {
+            "pages": {
+                "https://example.com/": {"hash": "aaa"},
+                "https://example.com/old-page": {"hash": "zzz"},
+            },
+        }
+        previous_knowledge = {
+            "pages": {
+                "https://example.com/": {
+                    "units": [{"fact": "Cached", "category": "info", "operational": True}],
+                },
+                "https://example.com/old-page": {
+                    "units": [{"fact": "Gone", "category": "info", "operational": True}],
+                },
+            },
+        }
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        self.assertIn("https://example.com/", result["pages"])
+        self.assertNotIn("https://example.com/old-page", result["pages"])
+        mock_extract.assert_not_called()
 
 
 class TestBuildGeminiClient(unittest.TestCase):
