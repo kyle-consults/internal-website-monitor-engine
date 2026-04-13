@@ -925,7 +925,7 @@ def run_knowledge_pipeline(
 
     Returns (knowledge, diff, report_text, summary).
     """
-    model = str(cfg.get("gemini_model", "gemini-2.0-flash-lite"))
+    model = str(cfg.get("gemini_model", "gemini-2.5-flash-lite"))
     knowledge = extract_all_pages(crawl_result, client, model, previous_snapshot, previous_knowledge)
     knowledge_diff = compare_knowledge(previous_knowledge, knowledge)
     report_text = render_knowledge_report(knowledge, knowledge_diff, baseline_created)
