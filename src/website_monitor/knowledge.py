@@ -152,6 +152,26 @@ def extract_page_knowledge(
         return []
 
 
+def _operational_values_match(
+    prev_units: list[dict[str, Any]],
+    new_units: list[dict[str, Any]],
+) -> bool:
+    """Check if two unit lists have identical operational values.
+
+    Returns True only if every operational unit's (category, label, value)
+    triple is the same in both lists. Any difference means the page genuinely
+    changed and the new extraction should be kept.
+    """
+    def _op_set(units: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
+        return {
+            (u.get("category", ""), u.get("label", ""), u.get("value", ""))
+            for u in units
+            if u.get("operational", True)
+        }
+
+    return _op_set(prev_units) == _op_set(new_units)
+
+
 def extract_all_pages(
     crawl_result: dict[str, Any],
     client: genai.Client,
@@ -209,6 +229,18 @@ def extract_all_pages(
         with ThreadPoolExecutor(max_workers=5) as pool:
             for url, units in pool.map(_do_extract, to_extract.items()):
                 extracted[url] = units
+
+    # Extraction stability check: if a page was re-extracted but all
+    # operational values are identical to the previous extraction, keep the
+    # previous extraction to avoid LLM nondeterminism noise.
+    stabilized: list[str] = []
+    for url, new_units in extracted.items():
+        prev_units = prev_knowledge_pages.get(url, {}).get("knowledge_units", [])
+        if prev_units and _operational_values_match(prev_units, new_units):
+            cached[url] = prev_units
+            stabilized.append(url)
+    for url in stabilized:
+        del extracted[url]
 
     # Assemble result
     pages_out: dict[str, dict[str, Any]] = {}
