@@ -27,7 +27,7 @@ class TestExtractAllPages(unittest.TestCase):
     @patch("website_monitor.knowledge.extract_page_knowledge")
     def test_hash_gated_reuses_cache_for_unchanged(self, mock_extract: MagicMock) -> None:
         """Unchanged pages (same hash) reuse prior knowledge; changed pages call Gemini."""
-        mock_extract.return_value = [{"fact": "New fact", "category": "info", "operational": True}]
+        mock_extract.return_value = [{"label": "New fact", "value": "new value", "category": "info", "operational": True}]
 
         crawl_result = {
             "homepage_url": "https://example.com",
@@ -45,10 +45,10 @@ class TestExtractAllPages(unittest.TestCase):
         previous_knowledge = {
             "pages": {
                 "https://example.com/": {
-                    "units": [{"fact": "Cached fact", "category": "hours", "operational": True}],
+                    "knowledge_units": [{"label": "Cached fact", "value": "cached value", "category": "hours", "operational": True}],
                 },
                 "https://example.com/about": {
-                    "units": [{"fact": "Old about", "category": "background", "operational": False}],
+                    "knowledge_units": [{"label": "Old about", "value": "old value", "category": "background", "operational": False}],
                 },
             },
         }
@@ -61,13 +61,13 @@ class TestExtractAllPages(unittest.TestCase):
 
         # Home page hash unchanged → cached
         self.assertEqual(
-            result["pages"]["https://example.com/"]["units"],
-            [{"fact": "Cached fact", "category": "hours", "operational": True}],
+            result["pages"]["https://example.com/"]["knowledge_units"],
+            [{"label": "Cached fact", "value": "cached value", "category": "hours", "operational": True}],
         )
         # About page hash changed → extracted
         self.assertEqual(
-            result["pages"]["https://example.com/about"]["units"],
-            [{"fact": "New fact", "category": "info", "operational": True}],
+            result["pages"]["https://example.com/about"]["knowledge_units"],
+            [{"label": "New fact", "value": "new value", "category": "info", "operational": True}],
         )
         # extract_page_knowledge called only for the changed page
         mock_extract.assert_called_once_with("About changed", client, "gemini-2.0-flash-lite")
@@ -75,7 +75,7 @@ class TestExtractAllPages(unittest.TestCase):
     @patch("website_monitor.knowledge.extract_page_knowledge")
     def test_first_run_extracts_all(self, mock_extract: MagicMock) -> None:
         """No previous snapshot → every page gets extracted."""
-        mock_extract.return_value = [{"fact": "A fact", "category": "info", "operational": True}]
+        mock_extract.return_value = [{"label": "A fact", "value": "a value", "category": "info", "operational": True}]
 
         crawl_result = {
             "homepage_url": "https://example.com",
@@ -109,12 +109,12 @@ class TestExtractAllPages(unittest.TestCase):
         client = MagicMock()
         result = extract_all_pages(crawl_result, client, "gemini-2.0-flash-lite", None, None)
 
-        self.assertEqual(result["pages"]["https://example.com/"]["units"], [])
+        self.assertEqual(result["pages"]["https://example.com/"]["knowledge_units"], [])
 
     @patch("website_monitor.knowledge.extract_page_knowledge")
     def test_new_page_not_in_previous_triggers_extraction(self, mock_extract: MagicMock) -> None:
         """A page in the crawl but not in previous snapshot gets extracted."""
-        mock_extract.return_value = [{"fact": "Brand new", "category": "info", "operational": True}]
+        mock_extract.return_value = [{"label": "Brand new", "value": "brand new value", "category": "info", "operational": True}]
 
         crawl_result = {
             "homepage_url": "https://example.com",
@@ -133,8 +133,8 @@ class TestExtractAllPages(unittest.TestCase):
 
         mock_extract.assert_called_once_with("New page text", client, "gemini-2.0-flash-lite")
         self.assertEqual(
-            result["pages"]["https://example.com/new-page"]["units"],
-            [{"fact": "Brand new", "category": "info", "operational": True}],
+            result["pages"]["https://example.com/new-page"]["knowledge_units"],
+            [{"label": "Brand new", "value": "brand new value", "category": "info", "operational": True}],
         )
 
     @patch("website_monitor.knowledge.extract_page_knowledge")
@@ -155,10 +155,10 @@ class TestExtractAllPages(unittest.TestCase):
         previous_knowledge = {
             "pages": {
                 "https://example.com/": {
-                    "units": [{"fact": "Cached", "category": "info", "operational": True}],
+                    "knowledge_units": [{"label": "Cached", "value": "cached val", "category": "info", "operational": True}],
                 },
                 "https://example.com/old-page": {
-                    "units": [{"fact": "Gone", "category": "info", "operational": True}],
+                    "knowledge_units": [{"label": "Gone", "value": "gone val", "category": "info", "operational": True}],
                 },
             },
         }
@@ -206,12 +206,14 @@ class TestExtractPageKnowledge(unittest.TestCase):
     def test_happy_path_extracts_units(self) -> None:
         units = [
             {
-                "fact": "Office hours are 9am-5pm",
+                "label": "Weekday Hours",
+                "value": "Monday-Friday 9am-5pm",
                 "category": "hours",
                 "operational": True,
             },
             {
-                "fact": "Founded in 2020",
+                "label": "Founded Year",
+                "value": "2020",
                 "category": "background",
                 "operational": False,
             },
@@ -220,7 +222,8 @@ class TestExtractPageKnowledge(unittest.TestCase):
         parsed.knowledge_units = []
         for u in units:
             ku = MagicMock()
-            ku.fact = u["fact"]
+            ku.label = u["label"]
+            ku.value = u["value"]
             ku.category = u["category"]
             ku.operational = u["operational"]
             parsed.knowledge_units.append(ku)
@@ -229,9 +232,11 @@ class TestExtractPageKnowledge(unittest.TestCase):
         result = extract_page_knowledge("Some page text", client, "gemini-2.0-flash-lite")
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0]["fact"], "Office hours are 9am-5pm")
+        self.assertEqual(result[0]["label"], "Weekday Hours")
+        self.assertEqual(result[0]["value"], "Monday-Friday 9am-5pm")
         self.assertTrue(result[0]["operational"])
-        self.assertEqual(result[1]["fact"], "Founded in 2020")
+        self.assertEqual(result[1]["label"], "Founded Year")
+        self.assertEqual(result[1]["value"], "2020")
         self.assertFalse(result[1]["operational"])
 
     def test_empty_text_returns_empty(self) -> None:
@@ -265,12 +270,14 @@ class TestExtractPageKnowledge(unittest.TestCase):
     def test_mixed_operational_flags_preserved(self) -> None:
         parsed = MagicMock()
         ku_op = MagicMock()
-        ku_op.fact = "Open Mon-Fri"
+        ku_op.label = "Weekday Hours"
+        ku_op.value = "Open Mon-Fri"
         ku_op.category = "hours"
         ku_op.operational = True
 
         ku_non = MagicMock()
-        ku_non.fact = "Company motto: Be Bold"
+        ku_non.label = "Company Motto"
+        ku_non.value = "Be Bold"
         ku_non.category = "branding"
         ku_non.operational = False
 
@@ -281,9 +288,11 @@ class TestExtractPageKnowledge(unittest.TestCase):
         ops = [u for u in result if u["operational"]]
         non_ops = [u for u in result if not u["operational"]]
         self.assertEqual(len(ops), 1)
-        self.assertEqual(ops[0]["fact"], "Open Mon-Fri")
+        self.assertEqual(ops[0]["label"], "Weekday Hours")
+        self.assertEqual(ops[0]["value"], "Open Mon-Fri")
         self.assertEqual(len(non_ops), 1)
-        self.assertEqual(non_ops[0]["fact"], "Company motto: Be Bold")
+        self.assertEqual(non_ops[0]["label"], "Company Motto")
+        self.assertEqual(non_ops[0]["value"], "Be Bold")
 
     def test_prompt_contains_page_text_tags(self) -> None:
         """Verify the prompt wraps page text in <PAGE_TEXT> tags for injection safety."""

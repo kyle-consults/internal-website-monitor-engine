@@ -21,9 +21,13 @@ DEFAULT_MODEL = "gemini-2.0-flash-lite"
 _KNOWLEDGE_UNIT_SCHEMA = types.Schema(
     type="OBJECT",
     properties={
-        "fact": types.Schema(
+        "label": types.Schema(
             type="STRING",
-            description="A single, self-contained piece of knowledge from the page.",
+            description="Concise normalized name for the knowledge unit, e.g. 'Weekday Hours'.",
+        ),
+        "value": types.Schema(
+            type="STRING",
+            description="The exact value as stated on the page, e.g. 'Monday-Friday 8:00 AM - 8:00 PM'.",
         ),
         "category": types.Schema(
             type="STRING",
@@ -41,7 +45,7 @@ _KNOWLEDGE_UNIT_SCHEMA = types.Schema(
             ),
         ),
     },
-    required=["fact", "category", "operational"],
+    required=["label", "value", "category", "operational"],
 )
 
 _RESPONSE_SCHEMA = types.Schema(
@@ -59,13 +63,17 @@ _RESPONSE_SCHEMA = types.Schema(
 _SYSTEM_PROMPT = """\
 You are a knowledge extraction assistant. Given the text content of a web page, \
 extract discrete, self-contained knowledge units. Each unit should capture a single \
-fact, detail, or piece of information.
+piece of information as a label+value pair.
+
+For each unit, provide a concise label (e.g., 'Weekday Hours') and the exact value \
+as stated on the page (e.g., 'Monday-Friday 8:00 AM - 8:00 PM'). Preserve exact \
+values — do not paraphrase numbers, times, or names.
 
 Classify each unit with a category and mark whether it is *operational* \
 (something that changes and matters to users, like hours, pricing, contact info) \
 or non-operational (static background, company history, branding).
 
-Only extract facts that are explicitly stated in the page text. Do not infer \
+Only extract information that is explicitly stated in the page text. Do not infer \
 or fabricate information."""
 
 
@@ -86,7 +94,7 @@ def extract_page_knowledge(
 ) -> list[dict[str, Any]]:
     """Extract knowledge units from *page_text* via Gemini structured output.
 
-    Returns a list of dicts with keys ``fact``, ``category``, ``operational``.
+    Returns a list of dicts with keys ``label``, ``value``, ``category``, ``operational``.
     Returns ``[]`` for empty/whitespace text or on any API error.
     """
     if not page_text or not page_text.strip():
@@ -111,7 +119,8 @@ def extract_page_knowledge(
         for ku in parsed.knowledge_units:
             units.append(
                 {
-                    "fact": ku.fact,
+                    "label": ku.label,
+                    "value": ku.value,
                     "category": ku.category,
                     "operational": ku.operational,
                 }
@@ -142,7 +151,7 @@ def extract_all_pages(
             "homepage_url": ...,
             "extracted_at": ...,
             "model": ...,
-            "pages": { url: {"units": [...]} },
+            "pages": { url: {"url": ..., "knowledge_units": [...]} },
         }
     """
     from concurrent.futures import ThreadPoolExecutor
@@ -165,7 +174,7 @@ def extract_all_pages(
             and current_hash == previous_hash
             and url in prev_knowledge_pages
         ):
-            cached[url] = prev_knowledge_pages[url].get("units", [])
+            cached[url] = prev_knowledge_pages[url].get("knowledge_units", [])
         else:
             to_extract[url] = str(page_data.get("text", ""))
 
@@ -184,9 +193,9 @@ def extract_all_pages(
     pages_out: dict[str, dict[str, Any]] = {}
     for url in current_pages:
         if url in cached:
-            pages_out[url] = {"units": cached[url]}
+            pages_out[url] = {"url": url, "knowledge_units": cached[url]}
         else:
-            pages_out[url] = {"units": extracted.get(url, [])}
+            pages_out[url] = {"url": url, "knowledge_units": extracted.get(url, [])}
 
     return {
         "schema_version": 1,
