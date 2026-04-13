@@ -14,6 +14,11 @@ from tempfile import NamedTemporaryFile
 from typing import Callable
 from urllib.parse import urldefrag, urljoin, urlparse
 
+from website_monitor.knowledge import build_gemini_client, extract_all_pages
+from website_monitor.knowledge_diff import compare_knowledge
+from website_monitor.knowledge_report import render_knowledge_report, build_knowledge_summary
+from website_monitor.webhook import send_webhook
+
 
 class ConfigurationError(RuntimeError):
     """Raised when required monitor configuration is missing or invalid."""
@@ -28,6 +33,7 @@ class MonitorPaths:
     latest_snapshot: Path
     latest_report: Path
     latest_summary: Path
+    latest_knowledge: Path
 
     @classmethod
     def for_root(cls, root: Path) -> "MonitorPaths":
@@ -42,6 +48,7 @@ class MonitorPaths:
             latest_snapshot=snapshots_dir / "latest-snapshot.json",
             latest_report=reports_dir / "latest-report.md",
             latest_summary=reports_dir / "latest-summary.json",
+            latest_knowledge=snapshots_dir / "latest-knowledge.json",
         )
 
 
@@ -152,6 +159,13 @@ def load_previous_snapshot(paths: MonitorPaths) -> dict[str, object] | None:
     if not paths.latest_snapshot.exists():
         return None
     with paths.latest_snapshot.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def load_previous_knowledge(paths: MonitorPaths) -> dict[str, object] | None:
+    if not paths.latest_knowledge.exists():
+        return None
+    with paths.latest_knowledge.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
@@ -663,6 +677,7 @@ def persist_outputs(
     summary: dict[str, object],
     archive_timestamp: str,
     keep_archives: int,
+    knowledge: dict[str, object] | None = None,
 ) -> None:
     paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
     paths.reports_dir.mkdir(parents=True, exist_ok=True)
@@ -682,6 +697,12 @@ def persist_outputs(
     prune_archives(paths.snapshots_dir, "snapshot-*.json", keep_archives)
     prune_archives(paths.reports_dir, "report-*.md", keep_archives)
     prune_archives(paths.reports_dir, "summary-*.json", keep_archives)
+
+    if knowledge is not None:
+        knowledge_archive = paths.snapshots_dir / f"knowledge-{archive_timestamp}.json"
+        write_json_atomic(knowledge_archive, knowledge)
+        write_json_atomic(paths.latest_knowledge, knowledge)
+        prune_archives(paths.snapshots_dir, "knowledge-*.json", keep_archives)
 
 
 def _default_stability_text_fn(page) -> str:
@@ -892,51 +913,100 @@ def recrawl_urls(urls: list[str], cfg: dict[str, object]) -> dict[str, dict[str,
     return verified
 
 
+def run_knowledge_pipeline(
+    crawl_result: dict[str, object],
+    cfg: dict[str, object],
+    client: object,
+    previous_snapshot: dict[str, object] | None,
+    previous_knowledge: dict[str, object] | None,
+    baseline_created: bool,
+) -> tuple[dict[str, object], dict[str, list[dict]], str, dict[str, object]]:
+    """Run knowledge extraction, comparison, and report.
+
+    Returns (knowledge, diff, report_text, summary).
+    """
+    model = str(cfg.get("gemini_model", "gemini-2.0-flash-lite"))
+    knowledge = extract_all_pages(crawl_result, client, model, previous_snapshot, previous_knowledge)
+    knowledge_diff = compare_knowledge(previous_knowledge, knowledge)
+    report_text = render_knowledge_report(knowledge, knowledge_diff, baseline_created)
+    summary = build_knowledge_summary(knowledge, knowledge_diff, baseline_created)
+    return knowledge, knowledge_diff, report_text, summary
+
+
 def run_monitor(
     paths: MonitorPaths,
     env: dict[str, str] | None = None,
     crawl_fn: CrawlFunction | None = None,
     verify_fn: VerifyFunction | None = None,
     archive_timestamp: str | None = None,
+    gemini_client: object | None = None,
 ) -> dict[str, object]:
     cfg = load_config(paths)
+    env = env or os.environ
     homepage_url = get_homepage_url(env)
     previous = load_previous_snapshot(paths)
     current = (crawl_fn or crawl)(homepage_url, cfg)
-    diff = compare_snapshots(previous, current)
     baseline_created = previous is None
-    if not baseline_created and diff.get("changed"):
-        verify_impl = verify_fn if verify_fn is not None else recrawl_urls
-        try:
-            verified = verify_impl(list(diff["changed"]), cfg)
-        except Exception:
-            verified = {}
-        diff = reconcile_verified_changes(diff, previous or {}, current, verified)
+
+    # Determine if knowledge pipeline is available
+    client = gemini_client
+    if client is None:
+        api_key = env.get("GEMINI_API_KEY", "").strip()
+        if api_key:
+            client = build_gemini_client(api_key)
+
+    knowledge = None
+    if client is not None:
+        # Knowledge pipeline path
+        previous_knowledge = load_previous_knowledge(paths)
+        knowledge, diff, report_text, summary = run_knowledge_pipeline(
+            current, cfg, client, previous, previous_knowledge, baseline_created,
+        )
+        # Optional webhook
+        webhook_url = cfg.get("webhook_url")
+        if webhook_url and (diff.get("changed") or diff.get("added") or diff.get("removed")):
+            send_webhook(str(webhook_url), {
+                "site": homepage_url,
+                "scanned_at": current.get("scanned_at", ""),
+                "changes": diff.get("changed", []) + diff.get("added", []) + diff.get("removed", []),
+            })
     else:
-        diff.setdefault("flapped", [])
-        diff.setdefault("unstable", [])
-        diff.setdefault("extraction_failed", [])
-    changes_detected = bool(diff["added"] or diff["removed"] or diff["changed"])
-    if changes_detected and not baseline_created:
-        changed_count = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"])
-        total_count = len(current.get("pages", {}))
-        if changed_count > total_count * 0.5:
-            print(
-                f"Note: {changed_count}/{total_count} pages changed. "
-                "If you recently updated the monitor engine, this is expected "
-                "on the first scan and will resolve on the next run."
-            )
-    review_threshold = int(cfg.get("review_threshold_chars", 500))
-    report_text = render_report(
-        current,
-        diff,
-        baseline_created,
-        previous=previous,
-        review_threshold_chars=review_threshold,
-    )
-    summary = build_summary(current, diff, baseline_created)
+        # Raw diff fallback path (existing behavior, unchanged)
+        diff = compare_snapshots(previous, current)
+        if not baseline_created and diff.get("changed"):
+            verify_impl = verify_fn if verify_fn is not None else recrawl_urls
+            try:
+                verified = verify_impl(list(diff["changed"]), cfg)
+            except Exception:
+                verified = {}
+            diff = reconcile_verified_changes(diff, previous or {}, current, verified)
+        else:
+            diff.setdefault("flapped", [])
+            diff.setdefault("unstable", [])
+            diff.setdefault("extraction_failed", [])
+        changes_detected = bool(diff["added"] or diff["removed"] or diff["changed"])
+        if changes_detected and not baseline_created:
+            changed_count = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"])
+            total_count = len(current.get("pages", {}))
+            if changed_count > total_count * 0.5:
+                print(
+                    f"Note: {changed_count}/{total_count} pages changed. "
+                    "If you recently updated the monitor engine, this is expected "
+                    "on the first scan and will resolve on the next run."
+                )
+        review_threshold = int(cfg.get("review_threshold_chars", 500))
+        report_text = render_report(
+            current,
+            diff,
+            baseline_created,
+            previous=previous,
+            review_threshold_chars=review_threshold,
+        )
+        summary = build_summary(current, diff, baseline_created)
+
+    changes_detected = summary.get("changes_detected", False)
     keep_archives = int(cfg.get("archive_retention", 12))
-    persisted = should_persist_run(diff, baseline_created)
+    persisted = baseline_created or changes_detected
     if persisted:
         persist_outputs(
             paths=paths,
@@ -945,6 +1015,7 @@ def run_monitor(
             summary=summary,
             archive_timestamp=archive_timestamp_value(archive_timestamp),
             keep_archives=keep_archives,
+            knowledge=knowledge,
         )
 
     return {
