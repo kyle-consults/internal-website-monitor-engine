@@ -114,6 +114,23 @@ def render_knowledge_report(
         lines.append("No knowledge changes detected.")
         lines.append("")
 
+    # ── Noise (auto-dismissed) ────────────────────────────────────────────
+    noise = diff.get("noise", [])
+    if noise:
+        lines.append("## Auto-Dismissed (extraction noise)")
+        lines.append("")
+        lines.append("These changes were detected but classified as extraction noise, not real content changes.")
+        lines.append("")
+        for entry in noise:
+            noise_type = entry.get("_noise_type", "changed")
+            if noise_type == "changed":
+                lines.append(f'- ~{entry.get("label", "")}~ "{entry.get("old_value", "")}" vs "{entry.get("new_value", "")}" (source: {entry.get("page", "")})')
+            elif noise_type == "added":
+                lines.append(f'- ~{entry.get("label", "")}~ appeared: "{entry.get("value", "")}" (source: {entry.get("page", "")})')
+            else:
+                lines.append(f'- ~{entry.get("label", "")}~ disappeared: "{entry.get("value", "")}" (source: {entry.get("page", "")})')
+        lines.append("")
+
     # ── Raw fallback ────────────────────────────────────────────────────────
     if raw_fallback_pages:
         lines.append("## Fallback: Raw Changes")

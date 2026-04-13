@@ -14,7 +14,7 @@ from tempfile import NamedTemporaryFile
 from typing import Callable
 from urllib.parse import urldefrag, urljoin, urlparse
 
-from website_monitor.knowledge import build_gemini_client, extract_all_pages
+from website_monitor.knowledge import build_gemini_client, extract_all_pages, verify_changes
 from website_monitor.knowledge_diff import compare_knowledge
 from website_monitor.knowledge_report import render_knowledge_report, build_knowledge_summary
 from website_monitor.webhook import send_webhook
@@ -928,6 +928,9 @@ def run_knowledge_pipeline(
     model = str(cfg.get("gemini_model", "gemini-2.5-flash-lite"))
     knowledge = extract_all_pages(crawl_result, client, model, previous_snapshot, previous_knowledge)
     knowledge_diff = compare_knowledge(previous_knowledge, knowledge)
+    # LLM verification pass: filter noise from real changes
+    if not baseline_created and (knowledge_diff.get("changed") or knowledge_diff.get("added") or knowledge_diff.get("removed")):
+        knowledge_diff = verify_changes(knowledge_diff, client, model)
     report_text = render_knowledge_report(knowledge, knowledge_diff, baseline_created)
     summary = build_knowledge_summary(knowledge, knowledge_diff, baseline_created)
     return knowledge, knowledge_diff, report_text, summary

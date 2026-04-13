@@ -102,7 +102,7 @@ def _fuzzy_reconcile(
 def compare_knowledge(
     previous: dict | None,
     current: dict,
-    fuzzy_threshold: float = 0.75,
+    fuzzy_threshold: float = 0.6,
 ) -> dict[str, list[dict]]:
     """Compare two knowledge snapshots and return categorized changes.
 

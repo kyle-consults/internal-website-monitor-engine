@@ -65,16 +65,26 @@ You are a knowledge extraction assistant. Given the text content of a web page, 
 extract discrete, self-contained knowledge units. Each unit should capture a single \
 piece of information as a label+value pair.
 
-For each unit, provide a concise label (e.g., 'Weekday Hours') and the exact value \
-as stated on the page (e.g., 'Monday-Friday 8:00 AM - 8:00 PM'). Preserve exact \
-values — do not paraphrase numbers, times, or names.
+Rules:
+- Use concise, stable labels. Prefer generic labels like 'Weekday Hours', 'Phone', \
+'Address', 'Accepted Insurance' that will be the same every time you see this page.
+- Preserve the EXACT values as stated on the page. Do not paraphrase, reformat, \
+or change capitalization of numbers, times, addresses, or names.
+- Mark operational=true for information that could change and a customer needs to \
+know: hours, pricing, contact info, insurance accepted, services offered, policies, \
+locations, availability.
+- Mark operational=false for static background: company history, branding, taglines, \
+general descriptions of what urgent care is.
 
-Classify each unit with a category and mark whether it is *operational* \
-(something that changes and matters to users, like hours, pricing, contact info) \
-or non-operational (static background, company history, branding).
+Do NOT extract:
+- Navigation menus, breadcrumbs, or page chrome
+- Search widgets, location finders, or interactive UI elements
+- Generic marketing copy or boilerplate disclaimers
+- Lists of all locations/states (extract only the specific location's info)
+- Call-to-action buttons or link text
+- Cookie/consent banner text
 
-Only extract information that is explicitly stated in the page text. Do not infer \
-or fabricate information."""
+Only extract information explicitly stated in the page text. Do not infer or fabricate."""
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -214,4 +224,161 @@ def extract_all_pages(
         "extracted_at": datetime.now(timezone.utc).isoformat(),
         "model": model,
         "pages": pages_out,
+    }
+
+
+# ── Change verification ─────────────────────────────────────────────────────
+
+_VERIFY_PROMPT = """\
+You are a change verification assistant. You are given a list of detected \
+knowledge changes from a website monitoring system. Some of these changes \
+are REAL (the website actually updated information) and some are NOISE \
+(the extraction interpreted the same content differently between runs).
+
+For each change, classify it as "real" or "noise".
+
+A change is NOISE if:
+- The old and new values say the same thing in different words or formatting
+- The change is just capitalization, punctuation, or whitespace differences
+- A list was reordered but contains the same items
+- Content moved from one label to another but the information is the same
+- Boilerplate, navigation, or UI text was extracted inconsistently
+
+A change is REAL if:
+- Actual factual information changed (hours, phone numbers, addresses, prices)
+- New services, policies, or providers were genuinely added or removed
+- Contact information was updated
+
+Be conservative: when in doubt, classify as noise. Only flag changes where \
+the actual meaning or facts changed for a real customer.
+
+Respond with a JSON array of objects, one per change, each with:
+- "index": the change number (starting from 0)
+- "verdict": "real" or "noise"
+- "reason": one sentence explaining why"""
+
+_VERIFY_SCHEMA = types.Schema(
+    type="OBJECT",
+    properties={
+        "verdicts": types.Schema(
+            type="ARRAY",
+            items=types.Schema(
+                type="OBJECT",
+                properties={
+                    "index": types.Schema(type="INTEGER"),
+                    "verdict": types.Schema(type="STRING"),
+                    "reason": types.Schema(type="STRING"),
+                },
+                required=["index", "verdict"],
+            ),
+        ),
+    },
+    required=["verdicts"],
+)
+
+
+def verify_changes(
+    diff: dict[str, list[dict[str, Any]]],
+    client: genai.Client,
+    model: str = DEFAULT_MODEL,
+) -> dict[str, list[dict[str, Any]]]:
+    """Use an LLM to filter noise from real changes in a knowledge diff.
+
+    Takes the raw diff from compare_knowledge and returns a filtered diff
+    with only real changes. Noise is moved to a 'noise' key.
+    """
+    candidates = []
+    for entry in diff.get("changed", []):
+        candidates.append({
+            "type": "changed",
+            "label": entry.get("label", ""),
+            "old_value": entry.get("old_value", ""),
+            "new_value": entry.get("new_value", ""),
+            "page": entry.get("page", ""),
+        })
+    for entry in diff.get("added", []):
+        candidates.append({
+            "type": "added",
+            "label": entry.get("label", ""),
+            "value": entry.get("value", ""),
+            "page": entry.get("page", ""),
+        })
+    for entry in diff.get("removed", []):
+        candidates.append({
+            "type": "removed",
+            "label": entry.get("label", ""),
+            "value": entry.get("value", ""),
+            "page": entry.get("page", ""),
+        })
+
+    if not candidates:
+        return diff
+
+    import json
+    changes_text = json.dumps(candidates, indent=2)
+    prompt = f"{_VERIFY_PROMPT}\n\nChanges to verify:\n{changes_text}"
+
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_VERIFY_SCHEMA,
+            ),
+        )
+        parsed = response.parsed
+        if isinstance(parsed, dict):
+            verdicts = parsed.get("verdicts", [])
+        else:
+            verdicts = parsed.verdicts
+    except Exception:
+        logger.exception("Change verification failed, keeping all changes")
+        return diff
+
+    # Build a set of noise indices
+    noise_indices: set[int] = set()
+    for v in verdicts:
+        if isinstance(v, dict):
+            if v.get("verdict") == "noise":
+                noise_indices.add(v.get("index", -1))
+        else:
+            if v.verdict == "noise":
+                noise_indices.add(v.index)
+
+    # Split diff into real and noise
+    changed_count = len(diff.get("changed", []))
+    added_count = len(diff.get("added", []))
+
+    real_changed = []
+    real_added = []
+    real_removed = []
+    noise = []
+
+    for i, entry in enumerate(diff.get("changed", [])):
+        if i in noise_indices:
+            noise.append({**entry, "_noise_type": "changed"})
+        else:
+            real_changed.append(entry)
+
+    for i, entry in enumerate(diff.get("added", [])):
+        idx = changed_count + i
+        if idx in noise_indices:
+            noise.append({**entry, "_noise_type": "added"})
+        else:
+            real_added.append(entry)
+
+    for i, entry in enumerate(diff.get("removed", [])):
+        idx = changed_count + added_count + i
+        if idx in noise_indices:
+            noise.append({**entry, "_noise_type": "removed"})
+        else:
+            real_removed.append(entry)
+
+    return {
+        "changed": real_changed,
+        "added": real_added,
+        "removed": real_removed,
+        "unchanged": diff.get("unchanged", []),
+        "noise": noise,
     }
