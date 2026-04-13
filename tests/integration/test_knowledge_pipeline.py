@@ -120,7 +120,9 @@ class TestKnowledgePipelineBaselineAndChangeDetection(unittest.TestCase):
         }
 
         with patch("website_monitor.monitor.extract_all_pages", return_value=knowledge_v2), \
-             patch("website_monitor.monitor.compare_knowledge", return_value=change_diff):
+             patch("website_monitor.monitor.compare_knowledge", return_value=change_diff), \
+             patch("website_monitor.monitor.quorum_verify_changes", side_effect=lambda diff, **kwargs: diff), \
+             patch("website_monitor.monitor.verify_changes", side_effect=lambda diff, *a, **kw: diff):
             result2 = run_monitor(
                 paths=self.paths,
                 env=self.env,

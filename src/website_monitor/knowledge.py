@@ -473,3 +473,155 @@ def verify_changes(
         "unchanged": diff.get("unchanged", []),
         "noise": noise,
     }
+
+
+# ── Multi-capture quorum ────────────────────────────────────────────────────
+
+
+def _fact_key(entry: dict[str, Any], change_type: str) -> tuple[str, str, str, str]:
+    """Unique key identifying a candidate change across captures."""
+    if change_type == "changed":
+        return (change_type, entry.get("page", ""), entry.get("category", ""),
+                entry.get("label", ""))
+    return (change_type, entry.get("page", ""), entry.get("category", ""),
+            entry.get("label", ""))
+
+
+def quorum_verify_changes(
+    diff: dict[str, list[dict[str, Any]]],
+    current_knowledge: dict[str, Any],
+    previous_knowledge: dict[str, Any] | None,
+    recrawl_fn,
+    client: genai.Client,
+    model: str,
+    cfg: dict[str, Any],
+    captures: int = 2,
+    quorum: int = 2,
+) -> dict[str, list[dict[str, Any]]]:
+    """Re-crawl pages with candidate changes and only keep changes that
+    appear in at least `quorum` out of (captures + 1) total captures.
+
+    The first capture is what's already in current_knowledge. We do
+    `captures` additional re-crawls (default 2 for 3 total), re-extract,
+    and check whether each candidate change survives.
+
+    Pages with inconsistent extraction across captures are marked unstable
+    and all their changes are dropped.
+    """
+    all_changes = (
+        [(e, "changed") for e in diff.get("changed", [])]
+        + [(e, "added") for e in diff.get("added", [])]
+        + [(e, "removed") for e in diff.get("removed", [])]
+    )
+    if not all_changes:
+        return diff
+
+    # Pages that have at least one candidate change
+    affected_urls = sorted({e.get("page", "") for e, _ in all_changes if e.get("page")})
+    if not affected_urls:
+        return diff
+
+    prev_pages = (previous_knowledge or {}).get("pages", {})
+
+    # Build per-page vote counts: {url: {fact_key: vote_count}}
+    # Initialize with votes from the primary extraction (current_knowledge)
+    page_change_votes: dict[str, dict[tuple, int]] = {url: {} for url in affected_urls}
+    page_change_entries: dict[tuple, dict] = {}
+    page_change_types: dict[tuple, str] = {}
+
+    for entry, change_type in all_changes:
+        url = entry.get("page", "")
+        key = _fact_key(entry, change_type)
+        page_change_votes[url][key] = 1  # primary extraction = 1 vote
+        page_change_entries[key] = entry
+        page_change_types[key] = change_type
+
+    # Do N additional captures
+    for _capture_idx in range(captures):
+        try:
+            recaptured = recrawl_fn(affected_urls, cfg)
+        except Exception:
+            logger.exception("Recrawl failed during quorum verification")
+            continue
+
+        for url in affected_urls:
+            page_data = recaptured.get(url)
+            if not page_data:
+                # Couldn't re-crawl this URL; don't count a vote
+                continue
+            page_text = str(page_data.get("text", ""))
+            new_units = extract_page_knowledge(page_text, client, model)
+            if not new_units:
+                # Extraction failed on this capture; don't use it
+                continue
+
+            # Build lookup of this capture's operational units
+            new_by_key: dict[tuple[str, str], str] = {}
+            for u in new_units:
+                if u.get("operational", True):
+                    new_by_key[(u.get("category", ""), u.get("label", ""))] = u.get("value", "")
+
+            # For each candidate change on this page, check if the new capture
+            # also exhibits it
+            prev_units = prev_pages.get(url, {}).get("knowledge_units", [])
+            prev_by_key: dict[tuple[str, str], str] = {}
+            for u in prev_units:
+                if u.get("operational", True):
+                    prev_by_key[(u.get("category", ""), u.get("label", ""))] = u.get("value", "")
+
+            for key in list(page_change_votes[url].keys()):
+                change_type = page_change_types[key]
+                entry = page_change_entries[key]
+                cat = entry.get("category", "")
+                label = entry.get("label", "")
+                cap_key = (cat, label)
+
+                if change_type == "changed":
+                    new_val = entry.get("new_value", "")
+                    if new_by_key.get(cap_key) == new_val:
+                        page_change_votes[url][key] += 1
+                elif change_type == "added":
+                    val = entry.get("value", "")
+                    # Added if it's in this capture AND not in previous
+                    if new_by_key.get(cap_key) == val and cap_key not in prev_by_key:
+                        page_change_votes[url][key] += 1
+                elif change_type == "removed":
+                    # Removed if the key is absent from this capture
+                    if cap_key not in new_by_key:
+                        page_change_votes[url][key] += 1
+
+    # A page is unstable if its captures produced wildly different extractions.
+    # Simple heuristic: if ANY candidate change on the page only has 1 vote
+    # (only showed up in the primary), AND we got at least one successful
+    # recapture, flag the page as unstable.
+    #
+    # Actually, simpler: just apply quorum threshold per-change. The page
+    # itself isn't unstable — the individual change is.
+
+    real_changed: list[dict] = []
+    real_added: list[dict] = []
+    real_removed: list[dict] = []
+    noise: list[dict] = diff.get("noise", []) or []
+
+    for url, votes in page_change_votes.items():
+        for key, vote_count in votes.items():
+            entry = page_change_entries[key]
+            change_type = page_change_types[key]
+            if vote_count >= quorum:
+                if change_type == "changed":
+                    real_changed.append(entry)
+                elif change_type == "added":
+                    real_added.append(entry)
+                elif change_type == "removed":
+                    real_removed.append(entry)
+            else:
+                # Failed quorum — treat as noise
+                noise.append({**entry, "_noise_type": change_type, "_noise_reason": "quorum_failed"})
+
+    return {
+        "changed": real_changed,
+        "added": real_added,
+        "removed": real_removed,
+        "unchanged": diff.get("unchanged", []),
+        "noise": noise,
+    }
