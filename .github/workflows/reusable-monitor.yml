@@ -21,6 +21,8 @@ on:
     secrets:
       RESEND_API_KEY:
         required: false
+      GEMINI_API_KEY:
+        required: false
 
 permissions:
   contents: write
@@ -30,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       WEBSITE_MONITOR_ROOT: ${{ github.workspace }}
 
     steps:

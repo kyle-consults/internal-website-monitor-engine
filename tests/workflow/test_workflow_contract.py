@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from website_monitor.monitor import ConfigurationError, MonitorPaths, run_monitor
+from website_monitor.monitor import ConfigurationError, MonitorPaths, run_monitor  # noqa: E402
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -54,6 +54,13 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn('git pull --rebase origin "${GITHUB_REF_NAME}"', workflow_text)
         self.assertIn('git push origin HEAD:"${GITHUB_REF_NAME}"', workflow_text)
+
+    def test_reusable_workflow_wires_optional_gemini_api_key(self) -> None:
+        workflow_text = (ROOT / ".github" / "workflows" / "reusable-monitor.yml").read_text(encoding="utf-8")
+
+        self.assertIn("GEMINI_API_KEY:", workflow_text)
+        self.assertIn("GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}", workflow_text)
+        self.assertIn("required: false", workflow_text)
 
     def test_missing_homepage_url_fails_fast(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
