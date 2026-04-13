@@ -1770,7 +1770,7 @@ def run_monitor(
 
         # Webhook
         webhook_url = cfg.get("webhook_url")
-        if webhook_url and knowledge_diff_result.get("changed") or knowledge_diff_result.get("added") or knowledge_diff_result.get("removed"):
+        if webhook_url and (knowledge_diff_result.get("changed") or knowledge_diff_result.get("added") or knowledge_diff_result.get("removed")):
             webhook_payload = {
                 "site": homepage_url,
                 "scanned_at": current.get("scanned_at", ""),
@@ -2009,3 +2009,141 @@ git commit -m "feat: add GEMINI_API_KEY as optional workflow secret"
 | 8 | Workflow + contracts | 1 test | Lane D |
 
 **Execution order:** Task 1 first (dependency). Then Tasks 2-3, 4, 5-6 in parallel. Then Tasks 7-8 sequentially.
+
+---
+
+## Eng Review Addendum (2026-04-12)
+
+The following changes were identified during /plan-eng-review and must be applied during implementation:
+
+### 1. Extract run_knowledge_pipeline() from run_monitor()
+
+In Task 7, instead of inlining both paths in `run_monitor()`, extract the knowledge pipeline into its own function:
+
+```python
+def run_knowledge_pipeline(
+    crawl_result: dict[str, object],
+    cfg: dict[str, object],
+    client,
+    previous_snapshot: dict[str, object] | None,
+    previous_knowledge: dict[str, object] | None,
+    baseline_created: bool,
+) -> tuple[dict[str, object], dict[str, list], str, dict[str, object]]:
+    """Run the knowledge extraction, comparison, and report pipeline.
+
+    Returns (knowledge_snapshot, knowledge_diff, report_text, summary).
+    """
+    model = str(cfg.get("gemini_model", "gemini-2.0-flash-lite"))
+    knowledge = extract_all_pages(
+        crawl_result=crawl_result,
+        client=client,
+        model=model,
+        previous_snapshot=previous_snapshot,
+        previous_knowledge=previous_knowledge,
+    )
+    knowledge_diff_result = compare_knowledge(previous_knowledge, knowledge)
+    report_text = render_knowledge_report(knowledge, knowledge_diff_result, baseline_created)
+    summary = build_knowledge_summary(knowledge, knowledge_diff_result, baseline_created)
+    return knowledge, knowledge_diff_result, report_text, summary
+```
+
+Then `run_monitor()` becomes a thin dispatcher:
+
+```python
+if client is not None:
+    previous_knowledge = load_previous_knowledge(paths)
+    knowledge, knowledge_diff_result, report_text, summary = run_knowledge_pipeline(
+        crawl_result=current, cfg=cfg, client=client,
+        previous_snapshot=previous, previous_knowledge=previous_knowledge,
+        baseline_created=baseline_created,
+    )
+    # Webhook
+    webhook_url = cfg.get("webhook_url")
+    if webhook_url and (knowledge_diff_result.get("changed") or knowledge_diff_result.get("added") or knowledge_diff_result.get("removed")):
+        send_webhook(str(webhook_url), {...})
+else:
+    # Raw diff fallback (existing code, unchanged)
+    ...
+```
+
+### 2. DRY helper in knowledge_report.py
+
+Extract the repeated group-by-category-and-render pattern into a helper:
+
+```python
+def _render_grouped_section(
+    entries: list[dict[str, Any]],
+    format_entry: Callable[[dict[str, Any]], str],
+    suffix: str = "",
+) -> list[str]:
+    """Group entries by category and render each with the format function."""
+    lines: list[str] = []
+    by_category: dict[str, list[dict]] = defaultdict(list)
+    for entry in entries:
+        by_category[entry["category"]].append(entry)
+    for category in sorted(by_category):
+        heading = f"### {category.title()}"
+        if suffix:
+            heading += f" ({suffix})"
+        lines.append(heading)
+        for entry in by_category[category]:
+            lines.append(format_entry(entry))
+        lines.append("")
+    return lines
+```
+
+Then use it in `render_knowledge_report()`:
+
+```python
+if diff.get("changed"):
+    lines.extend(_render_grouped_section(
+        diff["changed"],
+        lambda e: f'- **{e["label"]}** changed: was "{e["old_value"]}", now "{e["new_value"]}" (source: {e["page"]})',
+    ))
+if diff.get("added"):
+    lines.extend(_render_grouped_section(
+        diff["added"],
+        lambda e: f'- **{e["label"]}** added: "{e["value"]}" (source: {e["page"]})',
+        suffix="New",
+    ))
+if diff.get("removed"):
+    lines.extend(_render_grouped_section(
+        diff["removed"],
+        lambda e: f'- **{e["label"]}** removed: "{e["value"]}" (source: {e["page"]})',
+        suffix="Removed",
+    ))
+```
+
+### 3. Additional tests (11 gaps from coverage review)
+
+Add these tests to the appropriate task steps during implementation:
+
+**Task 2 (knowledge.py):**
+- `test_preserves_operational_flag_on_mixed_units` — extraction with both operational=True and operational=False units, verify both are returned with correct flags
+
+**Task 3 (extract_all_pages):**
+- `test_new_page_not_in_previous_triggers_extraction` — page in current but not in previous_snapshot should be extracted (no cache hit)
+- `test_removed_page_not_in_current_is_ignored` — page in previous but not in current is simply absent from result
+
+**Task 4 (knowledge_diff.py):**
+- `test_empty_knowledge_units_list_no_crash` — page with `knowledge_units: []` doesn't cause errors
+- `test_fuzzy_reconcile_no_removed_keys_returns_unchanged` — empty removed set returns immediately
+- `test_fuzzy_reconcile_picks_best_score_from_multiple_candidates` — multiple similar labels, picks highest similarity
+- `test_redirect_reconciliation_different_knowledge_not_redirect` — different units on different URLs stay as add+remove
+- `test_redirect_reconciliation_empty_fingerprint_not_redirect` — pages with no operational units don't match as redirects
+
+**Task 5 (knowledge_report.py):**
+- `test_renders_extraction_notes` — report includes extraction notes section when provided
+- `test_build_summary_baseline_created` — summary with baseline_created=True
+
+### 4. Pipeline diagram comment
+
+Add as module-level comment in `knowledge.py`:
+
+```python
+# Knowledge extraction pipeline:
+#
+#   crawl_result ──> hash_gate ──> extract (parallel) ──> knowledge_snapshot
+#                       │ (cache hit)
+#                previous_knowledge
+```
