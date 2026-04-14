@@ -86,7 +86,9 @@ jobs:
           fi
           git commit -m "Automated website scan"
           for attempt in 1 2 3; do
-            if git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}"; then
+            # --autostash: `latest-*` files are refreshed every run and left
+            # unstaged in the workspace, which would otherwise block rebase.
+            if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}"; then
               exit 0
             fi
             git rebase --abort || true
@@ -98,7 +100,10 @@ jobs:
           done
 
       - name: Send email notification
-        if: ${{ inputs.alert_email_to != '' && inputs.alert_email_from != '' && env.RESEND_API_KEY != '' }}
+        # always(): email should still fire even if the commit step failed
+        # (e.g., transient git push conflict), since notify reads the freshly
+        # written workspace files, not the committed archives.
+        if: ${{ always() && inputs.alert_email_to != '' && inputs.alert_email_from != '' && env.RESEND_API_KEY != '' }}
         env:
           ALERT_EMAIL_TO: ${{ inputs.alert_email_to }}
           ALERT_EMAIL_FROM: ${{ inputs.alert_email_from }}
