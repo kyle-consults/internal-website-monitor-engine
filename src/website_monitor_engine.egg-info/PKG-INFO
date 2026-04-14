@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: website-monitor-engine
+Version: 0.1.0
+Summary: Shared GitHub Actions engine for monitoring website changes
+Requires-Python: >=3.12
+Requires-Dist: playwright==1.58.0
+Requires-Dist: google-genai>=1.0.0

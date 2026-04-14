@@ -100,7 +100,7 @@ def render_knowledge_report(
     margin: 0 0 16px 0;
   }
   .change-item {
-    padding: 12px 0;
+    padding: 16px 0;
     border-bottom: 1px solid #f0f0f0;
   }
   .change-item:last-child {
@@ -124,14 +124,40 @@ def render_knowledge_report(
   .change-source {
     font-size: 12px;
     color: #999;
-    margin-top: 2px;
+    margin-top: 8px;
+  }
+  .change-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 14px;
+    table-layout: fixed;
+  }
+  .change-table th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    padding: 6px 10px;
+    width: 50%;
+    border-bottom: 1px solid #e5e5e5;
+  }
+  .change-table td {
+    padding: 8px 10px;
+    vertical-align: top;
+    word-wrap: break-word;
+    border: 1px solid #e5e5e5;
+    border-top: none;
   }
   .old-value {
-    color: #dc2626;
-    text-decoration: line-through;
+    background: #fef2f2;
+    color: #991b1b;
   }
   .new-value {
-    color: #16a34a;
+    background: #f0fdf4;
+    color: #166534;
   }
   .added-tag {
     color: #16a34a;
@@ -231,8 +257,17 @@ def render_knowledge_report(
 <div class="change-item">
   <div class="change-category">{cat}</div>
   <div class="change-label">{label}</div>
-  <div class="change-detail"><span class="old-value">{old_val}</span></div>
-  <div class="change-detail"><span class="new-value">{new_val}</span></div>
+  <table class="change-table">
+    <thead>
+      <tr><th>Before</th><th>After</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="old-value">{old_val}</td>
+        <td class="new-value">{new_val}</td>
+      </tr>
+    </tbody>
+  </table>
   <div class="change-source">{escape(source)}</div>
 </div>
 """
@@ -260,7 +295,7 @@ def render_knowledge_report(
 <div class="change-item">
   <div class="change-category">{cat} <span class="removed-tag">REMOVED</span></div>
   <div class="change-label">{label}</div>
-  <div class="change-detail" style="color: #999; text-decoration: line-through;">{val}</div>
+  <div class="change-detail" style="color: #991b1b;">{val}</div>
   <div class="change-source">{escape(source)}</div>
 </div>
 """
