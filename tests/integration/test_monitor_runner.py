@@ -216,12 +216,18 @@ class MonitorRunnerIntegrationTests(unittest.TestCase):
 
         self.assertTrue(first_result["persisted"])
         self.assertFalse(second_result["persisted"])
-        self.assertEqual(self.paths.latest_report.read_text(encoding="utf-8"), original_report)
-        self.assertEqual(self.paths.latest_snapshot.read_text(encoding="utf-8"), original_snapshot)
-        self.assertEqual((self.paths.reports_dir / "latest-summary.json").read_text(encoding="utf-8"), original_summary)
+        # Latest pointers are refreshed every run so template/format changes
+        # propagate even on quiet runs. They should reflect the second run.
+        refreshed_snapshot = json.loads(self.paths.latest_snapshot.read_text(encoding="utf-8"))
+        refreshed_summary = json.loads((self.paths.reports_dir / "latest-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(refreshed_snapshot["scanned_at"], "2026-03-26T00:00:00+00:00")
+        self.assertFalse(refreshed_summary["changes_detected"])
+        # Archives remain gated on material changes.
         self.assertEqual(snapshot_archives, ["snapshot-2026-03-25T00-00-00Z.json"])
         self.assertEqual(report_archives, ["report-2026-03-25T00-00-00Z.md"])
         self.assertEqual(summary_archives, ["summary-2026-03-25T00-00-00Z.json"])
+        # Unused locals retained to keep the first-run read explicit.
+        _ = (original_report, original_snapshot, original_summary)
 
 
     def _seed_baseline(self, pages: dict[str, dict]) -> None:

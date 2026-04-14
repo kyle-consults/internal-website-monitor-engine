@@ -75,7 +75,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports snapshots
+          # Only archive files (timestamped) get committed. `latest-*` files are
+          # refreshed every run so format/template changes propagate to notify,
+          # but we exclude them here to avoid daily heartbeat commits.
+          git add 'reports/report-*.md' 'reports/summary-*.json' \
+                  'snapshots/snapshot-*.json' 'snapshots/knowledge-*.json' 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No output changes to commit."
             exit 0

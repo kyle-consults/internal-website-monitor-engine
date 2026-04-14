@@ -670,6 +670,25 @@ def archive_timestamp_value(override: str | None = None) -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 
+def refresh_latest_outputs(
+    *,
+    paths,
+    current: dict,
+    report_text: str,
+    summary: dict,
+    knowledge: dict | None = None,
+) -> None:
+    """Always rewrite the `latest-*` pointers so format/template changes propagate
+    even on runs with no material changes. Archives remain gated on change."""
+    paths.snapshots_dir.mkdir(parents=True, exist_ok=True)
+    paths.reports_dir.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(paths.latest_snapshot, current)
+    write_text_atomic(paths.latest_report, report_text)
+    write_json_atomic(paths.latest_summary, summary)
+    if knowledge is not None:
+        write_json_atomic(paths.latest_knowledge, knowledge)
+
+
 def persist_outputs(
     paths: MonitorPaths,
     current: dict[str, object],
@@ -1070,6 +1089,17 @@ def run_monitor(
     changes_detected = summary.get("changes_detected", False)
     keep_archives = int(cfg.get("archive_retention", 12))
     persisted = baseline_created or changes_detected
+
+    # Always refresh latest pointers so template/format changes propagate
+    # even on quiet runs, and the summary accurately reflects this scan.
+    refresh_latest_outputs(
+        paths=paths,
+        current=current,
+        report_text=report_text,
+        summary=summary,
+        knowledge=knowledge,
+    )
+
     if persisted:
         persist_outputs(
             paths=paths,
