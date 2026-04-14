@@ -216,11 +216,11 @@ def _operational_values_match(
                 if other_key[0] == cat and other_key not in (set(prev_by_key) & set(new_by_key)):
                     sim = SequenceMatcher(a=missing_val, b=other_val).ratio()
                     best_sim = max(best_sim, sim)
-            if best_sim < 0.85:
+            if best_sim < 0.7:
                 return False
         elif prev_val != new_val:
             sim = SequenceMatcher(a=prev_val, b=new_val).ratio()
-            if sim < 0.85:
+            if sim < 0.7:
                 return False
 
     return True

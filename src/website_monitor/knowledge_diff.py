@@ -69,17 +69,26 @@ def _fuzzy_reconcile(
         if not removed_keys:
             continue
 
-        # Build all candidate pairs with scores
+        # Build all candidate pairs with scores.
+        # Match on EITHER label similarity OR value similarity, since
+        # LLM extraction often produces different labels for the same fact.
         candidates: list[tuple[float, tuple, tuple]] = []
         for a_key in added_keys:
             for r_key in removed_keys:
-                score = SequenceMatcher(None, r_key[2], a_key[2]).ratio()
-                if score >= threshold:
-                    candidates.append((score, a_key, r_key))
+                label_score = SequenceMatcher(None, r_key[2], a_key[2]).ratio()
+                value_score = SequenceMatcher(
+                    None, str(removed[r_key]), str(added[a_key])
+                ).ratio()
+                # Combined score: whichever is higher, with a boost if both agree
+                best_score = max(label_score, value_score)
+                # If values are very similar (>0.7) in the same category,
+                # treat as a match regardless of label (handles label drift)
+                if value_score >= 0.7 or label_score >= threshold:
+                    candidates.append((best_score, a_key, r_key))
 
         # Greedily pick best matches
         candidates.sort(key=lambda x: x[0], reverse=True)
-        for score, a_key, r_key in candidates:
+        for _score, a_key, r_key in candidates:
             if a_key in used_added or r_key in used_removed:
                 continue
             used_added.add(a_key)
