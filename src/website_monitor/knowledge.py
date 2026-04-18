@@ -566,9 +566,11 @@ def quorum_verify_changes(
             # also exhibits it
             prev_units = prev_pages.get(url, {}).get("knowledge_units", [])
             prev_by_key: dict[tuple[str, str], str] = {}
+            prev_values: list[str] = []
             for u in prev_units:
                 if u.get("operational", True):
                     prev_by_key[(u.get("category", ""), u.get("label", ""))] = u.get("value", "")
+                    prev_values.append(u.get("value", ""))
 
             for key in list(page_change_votes[url].keys()):
                 change_type = page_change_types[key]
@@ -583,8 +585,22 @@ def quorum_verify_changes(
                         page_change_votes[url][key] += 1
                 elif change_type == "added":
                     val = entry.get("value", "")
-                    # Added if it's in this capture AND not in previous
-                    if new_by_key.get(cap_key) == val and cap_key not in prev_by_key:
+                    # An add is genuine if the value exists somewhere on the
+                    # recaptured page AND was not in the previous snapshot,
+                    # under any label. Label drift on recapture would otherwise
+                    # falsely reject real adds because the original (cat, label)
+                    # slot holds a different value in the new capture.
+                    value_in_new = any(
+                        v == val
+                        or SequenceMatcher(None, str(v), str(val)).ratio() >= 0.85
+                        for v in new_values
+                    )
+                    value_in_prev = any(
+                        v == val
+                        or SequenceMatcher(None, str(v), str(val)).ratio() >= 0.85
+                        for v in prev_values
+                    )
+                    if value_in_new and not value_in_prev:
                         page_change_votes[url][key] += 1
                 elif change_type == "removed":
                     old_val = entry.get("value", "")
