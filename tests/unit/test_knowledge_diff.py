@@ -137,6 +137,32 @@ class TestCompareKnowledge(unittest.TestCase):
         self.assertEqual(len(result["removed"]), 0)
         self.assertEqual(len(result["changed"]), 0)
 
+    def test_cross_category_label_drift_reconciled_as_unchanged(self):
+        """LLM relabels same fact under a different category → no add/remove pair.
+
+        Regression for the AFC report: services listed under 'Urgent Care Clinic
+        Services' in one run got re-extracted under 'service' in the next run
+        with the same value. Should reconcile as unchanged, not as removed.
+        """
+        value = "Bleeding or cuts that need stitches"
+        url = "https://example.com/clinic"
+        previous = _snapshot({
+            url: [
+                {"category": "service", "label": "Urgent Care Clinic Services",
+                 "value": value, "operational": True},
+            ],
+        })
+        current = _snapshot({
+            url: [
+                {"category": "policy", "label": "Services Offered",
+                 "value": value, "operational": True},
+            ],
+        })
+        result = compare_knowledge(previous, current)
+
+        self.assertEqual(len(result["removed"]), 0)
+        self.assertEqual(len(result["added"]), 0)
+
     def test_empty_knowledge_units_list_no_crash(self):
         """Page with knowledge_units: [] works without error."""
         previous = _snapshot({"https://example.com/empty": []})
@@ -163,6 +189,32 @@ class TestFuzzyReconcile(unittest.TestCase):
         )
         self.assertEqual(len(matched), 0)
         self.assertEqual(len(remaining_added), 1)
+        self.assertEqual(len(remaining_removed), 0)
+
+    def test_fuzzy_reconcile_matches_across_categories_by_value(self):
+        """Label+category drift: same value re-extracted under different category.
+
+        Regression: AFC report showed "COVID-19 Vaccine Information" disappear and
+        "COVID-19 Vaccine Contact" appear with the same value. Previously, grouping
+        by (page, category) prevented cross-category reconciliation, so identical
+        values slipped through as added+removed.
+        """
+        page = "https://example.com/covid"
+        value = "Contact us about getting a COVID-19 vaccination."
+        added = {
+            (page, "service", "COVID-19 Vaccine Contact"): value,
+        }
+        removed = {
+            (page, "policy", "COVID-19 Vaccine Information"): value,
+        }
+        matched, remaining_added, remaining_removed = _fuzzy_reconcile(
+            added, removed, threshold=0.75,
+        )
+
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0]["old_value"], value)
+        self.assertEqual(matched[0]["new_value"], value)
+        self.assertEqual(len(remaining_added), 0)
         self.assertEqual(len(remaining_removed), 0)
 
     def test_fuzzy_reconcile_picks_best_score_from_multiple_candidates(self):

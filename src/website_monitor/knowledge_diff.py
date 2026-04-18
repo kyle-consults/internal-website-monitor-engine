@@ -52,38 +52,40 @@ def _fuzzy_reconcile(
     used_added: set[tuple] = set()
     used_removed: set[tuple] = set()
 
-    # Group by (page, category) for efficient matching
-    added_by_group: dict[tuple, list[tuple]] = {}
+    # Group by page only (not page+category). LLM extraction drifts category
+    # assignments across runs — the same fact can land in "service" one run
+    # and "policy" the next. Grouping by category would leave those unmatched.
+    added_by_group: dict[str, list[tuple]] = {}
     for key in added:
-        group = (key[0], key[1])  # (page_url, category)
-        added_by_group.setdefault(group, []).append(key)
+        added_by_group.setdefault(key[0], []).append(key)
 
-    removed_by_group: dict[tuple, list[tuple]] = {}
+    removed_by_group: dict[str, list[tuple]] = {}
     for key in removed:
-        group = (key[0], key[1])
-        removed_by_group.setdefault(group, []).append(key)
+        removed_by_group.setdefault(key[0], []).append(key)
 
-    # For each group, find best fuzzy matches
-    for group, added_keys in added_by_group.items():
-        removed_keys = removed_by_group.get(group, [])
+    # For each page, find best fuzzy matches
+    for page, added_keys in added_by_group.items():
+        removed_keys = removed_by_group.get(page, [])
         if not removed_keys:
             continue
 
         # Build all candidate pairs with scores.
         # Match on EITHER label similarity OR value similarity, since
         # LLM extraction often produces different labels for the same fact.
+        # Cross-category pairs require a stricter value threshold to avoid
+        # spurious matches between unrelated facts that share common words.
         candidates: list[tuple[float, tuple, tuple]] = []
         for a_key in added_keys:
             for r_key in removed_keys:
+                same_category = a_key[1] == r_key[1]
                 label_score = SequenceMatcher(None, r_key[2], a_key[2]).ratio()
                 value_score = SequenceMatcher(
                     None, str(removed[r_key]), str(added[a_key])
                 ).ratio()
-                # Combined score: whichever is higher, with a boost if both agree
                 best_score = max(label_score, value_score)
-                # If values are very similar (>0.7) in the same category,
-                # treat as a match regardless of label (handles label drift)
-                if value_score >= 0.7 or label_score >= threshold:
+                value_match_threshold = 0.7 if same_category else 0.85
+                label_match_threshold = threshold if same_category else 0.9
+                if value_score >= value_match_threshold or label_score >= label_match_threshold:
                     candidates.append((best_score, a_key, r_key))
 
         # Greedily pick best matches

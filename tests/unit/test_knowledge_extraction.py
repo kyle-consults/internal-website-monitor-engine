@@ -10,6 +10,7 @@ from website_monitor.knowledge import (  # noqa: E402
     build_gemini_client,
     extract_all_pages,
     extract_page_knowledge,
+    quorum_verify_changes,
 )
 
 
@@ -307,6 +308,106 @@ class TestExtractPageKnowledge(unittest.TestCase):
         self.assertIn("<PAGE_TEXT>", contents)
         self.assertIn("</PAGE_TEXT>", contents)
         self.assertIn("Hello world", contents)
+
+
+class TestQuorumVerifyChanges(unittest.TestCase):
+    """Tests for quorum_verify_changes (multi-capture label-drift handling)."""
+
+    def _knowledge(self, url: str, units: list[dict]) -> dict:
+        return {"pages": {url: {"url": url, "knowledge_units": units}}}
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_removed_rejected_when_value_still_present_under_different_label(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """Label drift: previous had 'Hours'='extended hours ...', current extracted
+        same value under 'Weekend Hours'. compare_knowledge emits this as removed.
+        Quorum recaptures keep producing the value under yet more labels. The
+        'removed' candidate must fail quorum because the value is still present.
+        """
+        url = "https://example.com/hours"
+        value = "extended hours on evenings and weekends"
+
+        diff = {
+            "changed": [],
+            "added": [],
+            "removed": [
+                {"page": url, "category": "hours", "label": "Hours", "value": value},
+            ],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekend Hours", "value": value, "operational": True},
+        ])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Hours", "value": value, "operational": True},
+        ])
+
+        # Every recapture returns the same value under a drifting label
+        mock_extract.return_value = [
+            {"category": "hours", "label": "Evening Hours", "value": value, "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["removed"]), 0,
+                         "Removed must be rejected when value still exists on page")
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_removed_confirmed_when_value_truly_gone(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """Genuine removal: value is absent from every recapture → passes quorum."""
+        url = "https://example.com/hours"
+        value = "Open 24/7"
+
+        diff = {
+            "changed": [],
+            "added": [],
+            "removed": [
+                {"page": url, "category": "hours", "label": "Hours", "value": value},
+            ],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Hours", "value": value, "operational": True},
+        ])
+
+        mock_extract.return_value = [
+            {"category": "hours", "label": "Weekday Hours", "value": "Mon-Fri 9-5", "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["removed"]), 1)
+        self.assertEqual(result["removed"][0]["value"], value)
 
 
 if __name__ == "__main__":

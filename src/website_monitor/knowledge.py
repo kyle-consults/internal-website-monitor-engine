@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from difflib import SequenceMatcher
 from typing import Any
 
 from google import genai
@@ -168,8 +169,6 @@ def _operational_values_match(
     wording for the same fact across runs (e.g., "extended hours" vs
     "extended hours on evenings and weekends").
     """
-    from difflib import SequenceMatcher
-
     def _op_list(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [u for u in units if u.get("operational", True)]
 
@@ -557,9 +556,11 @@ def quorum_verify_changes(
 
             # Build lookup of this capture's operational units
             new_by_key: dict[tuple[str, str], str] = {}
+            new_values: list[str] = []
             for u in new_units:
                 if u.get("operational", True):
                     new_by_key[(u.get("category", ""), u.get("label", ""))] = u.get("value", "")
+                    new_values.append(u.get("value", ""))
 
             # For each candidate change on this page, check if the new capture
             # also exhibits it
@@ -586,8 +587,19 @@ def quorum_verify_changes(
                     if new_by_key.get(cap_key) == val and cap_key not in prev_by_key:
                         page_change_votes[url][key] += 1
                 elif change_type == "removed":
-                    # Removed if the key is absent from this capture
-                    if cap_key not in new_by_key:
+                    old_val = entry.get("value", "")
+                    # A removal is only genuine if the value is absent from this
+                    # capture under ANY label. Label/category drift (same fact,
+                    # relabeled) would otherwise falsely confirm the removal
+                    # because the old (cat, label) slot is empty.
+                    if cap_key in new_by_key:
+                        continue
+                    value_still_present = any(
+                        v == old_val
+                        or SequenceMatcher(None, str(v), str(old_val)).ratio() >= 0.85
+                        for v in new_values
+                    )
+                    if not value_still_present:
                         page_change_votes[url][key] += 1
 
     # A page is unstable if its captures produced wildly different extractions.
