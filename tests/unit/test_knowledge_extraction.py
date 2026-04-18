@@ -409,6 +409,104 @@ class TestQuorumVerifyChanges(unittest.TestCase):
         self.assertEqual(len(result["removed"]), 1)
         self.assertEqual(result["removed"][0]["value"], value)
 
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_added_confirmed_when_value_present_under_different_label(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """Genuine add with label drift on recapture: previous had no such value,
+        current extracted it under label X, recaptures extract the same value
+        under label Y. The 'added' candidate must pass quorum because the value
+        is genuinely new to the page, even if the label drifted.
+        """
+        url = "https://example.com/hours"
+        value = "Now open until midnight on Fridays"
+
+        diff = {
+            "changed": [],
+            "added": [
+                {"page": url, "category": "hours", "label": "Friday Hours", "value": value},
+            ],
+            "removed": [],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Friday Hours", "value": value, "operational": True},
+        ])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekday Hours", "value": "Mon-Thu 9-5", "operational": True},
+        ])
+
+        # Recaptures extract the same new value but under a drifted label
+        mock_extract.return_value = [
+            {"category": "hours", "label": "Extended Friday Hours", "value": value, "operational": True},
+            {"category": "hours", "label": "Weekday Hours", "value": "Mon-Thu 9-5", "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["added"]), 1,
+                         "Added must pass quorum when value is present on recapture "
+                         "even under a drifted label")
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_added_rejected_when_value_was_already_in_previous(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """Phantom add: current has a fact with a new label, but the value was
+        already in previous under a different label. Must fail quorum."""
+        url = "https://example.com/hours"
+        value = "Mon-Fri 9am-5pm"
+
+        diff = {
+            "changed": [],
+            "added": [
+                {"page": url, "category": "hours", "label": "Business Hours", "value": value},
+            ],
+            "removed": [],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Business Hours", "value": value, "operational": True},
+        ])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekday Hours", "value": value, "operational": True},
+        ])
+
+        mock_extract.return_value = [
+            {"category": "hours", "label": "Weekday Hours", "value": value, "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["added"]), 0,
+                         "Added must be rejected when value was already in previous")
+
 
 if __name__ == "__main__":
     unittest.main()
