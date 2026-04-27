@@ -10,6 +10,7 @@ from website_monitor.knowledge import (  # noqa: E402
     build_gemini_client,
     extract_all_pages,
     extract_page_knowledge,
+    filter_text_supported_noise,
     quorum_verify_changes,
 )
 
@@ -308,6 +309,187 @@ class TestExtractPageKnowledge(unittest.TestCase):
         self.assertIn("<PAGE_TEXT>", contents)
         self.assertIn("</PAGE_TEXT>", contents)
         self.assertIn("Hello world", contents)
+
+
+class TestFilterTextSupportedNoise(unittest.TestCase):
+    def test_added_value_already_in_previous_raw_text_is_noise(self) -> None:
+        url = "https://example.com/student-program"
+        value = (
+            "Patient insurance isn't necessary to be seen and treated. "
+            "We accept all patients regardless of insurance type or status."
+        )
+        diff = {
+            "changed": [],
+            "added": [
+                {
+                    "page": url,
+                    "category": "policy",
+                    "label": "Insurance Policy",
+                    "value": value,
+                },
+            ],
+            "removed": [],
+            "unchanged": [],
+        }
+        previous_snapshot = {
+            "pages": {
+                url: {
+                    "text": f"SCUSD student program. {value}",
+                },
+            },
+        }
+        current_snapshot = {
+            "pages": {
+                url: {
+                    "text": f"SCUSD student program. {value}",
+                },
+            },
+        }
+
+        result = filter_text_supported_noise(diff, previous_snapshot, current_snapshot)
+
+        self.assertEqual(result["added"], [])
+        self.assertEqual(len(result["noise"]), 1)
+        self.assertEqual(result["noise"][0]["_noise_reason"], "value_existed_in_previous_text")
+
+    def test_removed_value_still_in_current_raw_text_is_noise(self) -> None:
+        url = "https://example.com/urgent-care"
+        value = "Walk-Ins Welcome"
+        diff = {
+            "changed": [],
+            "added": [],
+            "removed": [
+                {
+                    "page": url,
+                    "category": "policy",
+                    "label": "Walk-in Policy",
+                    "value": value,
+                },
+            ],
+            "unchanged": [],
+        }
+        previous_snapshot = {"pages": {url: {"text": value}}}
+        current_snapshot = {"pages": {url: {"text": f"{value}. Open daily."}}}
+
+        result = filter_text_supported_noise(diff, previous_snapshot, current_snapshot)
+
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(len(result["noise"]), 1)
+        self.assertEqual(result["noise"][0]["_noise_reason"], "value_still_in_current_text")
+
+    def test_equivalent_no_appointment_requirement_change_is_noise(self) -> None:
+        url = "https://example.com/patient-services/urgent-care"
+        diff = {
+            "changed": [
+                {
+                    "page": url,
+                    "category": "policy",
+                    "label": "Appointment Requirement",
+                    "old_value": "No",
+                    "new_value": "do not require appointments or referrals",
+                },
+            ],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+        }
+
+        result = filter_text_supported_noise(diff, None, None)
+
+        self.assertEqual(result["changed"], [])
+        self.assertEqual(len(result["noise"]), 1)
+        self.assertEqual(result["noise"][0]["_noise_reason"], "equivalent_appointment_requirement")
+
+    def test_real_added_value_absent_from_previous_text_is_kept(self) -> None:
+        url = "https://example.com/hours"
+        diff = {
+            "changed": [],
+            "added": [
+                {
+                    "page": url,
+                    "category": "hours",
+                    "label": "Holiday Hours",
+                    "value": "Closed December 25",
+                },
+            ],
+            "removed": [],
+            "unchanged": [],
+        }
+        previous_snapshot = {"pages": {url: {"text": "Open regular hours."}}}
+        current_snapshot = {"pages": {url: {"text": "Closed December 25."}}}
+
+        result = filter_text_supported_noise(diff, previous_snapshot, current_snapshot)
+
+        self.assertEqual(len(result["added"]), 1)
+        self.assertEqual(result.get("noise", []), [])
+
+    def test_short_added_value_is_not_matched_inside_unrelated_words(self) -> None:
+        url = "https://example.com/policy"
+        diff = {
+            "changed": [],
+            "added": [
+                {
+                    "page": url,
+                    "category": "policy",
+                    "label": "Referral Required",
+                    "value": "No",
+                },
+            ],
+            "removed": [],
+            "unchanged": [],
+        }
+        previous_snapshot = {"pages": {url: {"text": "Use the North entrance for check-in."}}}
+        current_snapshot = {"pages": {url: {"text": "Use the North entrance. Referral required: No."}}}
+
+        result = filter_text_supported_noise(diff, previous_snapshot, current_snapshot)
+
+        self.assertEqual(len(result["added"]), 1)
+        self.assertEqual(result.get("noise", []), [])
+
+    def test_short_removed_value_is_not_matched_inside_unrelated_words(self) -> None:
+        url = "https://example.com/policy"
+        diff = {
+            "changed": [],
+            "added": [],
+            "removed": [
+                {
+                    "page": url,
+                    "category": "policy",
+                    "label": "Walk-ins Accepted",
+                    "value": "Yes",
+                },
+            ],
+            "unchanged": [],
+        }
+        previous_snapshot = {"pages": {url: {"text": "Walk-ins accepted: Yes."}}}
+        current_snapshot = {"pages": {url: {"text": "Yesterday's policy was updated."}}}
+
+        result = filter_text_supported_noise(diff, previous_snapshot, current_snapshot)
+
+        self.assertEqual(len(result["removed"]), 1)
+        self.assertEqual(result.get("noise", []), [])
+
+    def test_appointment_availability_change_is_not_requirement_equivalence(self) -> None:
+        url = "https://example.com/appointments"
+        diff = {
+            "changed": [
+                {
+                    "page": url,
+                    "category": "policy",
+                    "label": "Appointment Availability",
+                    "old_value": "Walk-ins welcome",
+                    "new_value": "No appointments available",
+                },
+            ],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+        }
+
+        result = filter_text_supported_noise(diff, None, None)
+
+        self.assertEqual(len(result["changed"]), 1)
+        self.assertEqual(result.get("noise", []), [])
 
 
 class TestQuorumVerifyChanges(unittest.TestCase):

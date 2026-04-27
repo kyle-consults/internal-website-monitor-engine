@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -472,6 +473,132 @@ def verify_changes(
         "unchanged": diff.get("unchanged", []),
         "noise": noise,
     }
+
+
+def _normalize_fact_text(value: str) -> str:
+    normalized = str(value or "").lower()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = re.sub(r"[^a-z0-9$%:/.'-]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip(" .")
+
+
+def _value_in_text(value: str, text: str) -> bool:
+    normalized_value = _normalize_fact_text(value)
+    if not normalized_value:
+        return False
+    normalized_text = _normalize_fact_text(text)
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized_value)}(?![a-z0-9])"
+    return re.search(pattern, normalized_text) is not None
+
+
+def _page_text(snapshot: dict[str, Any] | None, url: str) -> str:
+    page = ((snapshot or {}).get("pages", {}) or {}).get(url, {})
+    if not isinstance(page, dict):
+        return ""
+    return str(page.get("text", ""))
+
+
+def _is_no_appointment_requirement(value: str) -> bool:
+    normalized = _normalize_fact_text(value)
+    if any(
+        token in normalized
+        for token in (
+            "no appointment available",
+            "no appointments available",
+            "appointment unavailable",
+            "appointments unavailable",
+        )
+    ):
+        return False
+    if normalized in {"no", "none", "not required", "not needed"}:
+        return True
+    has_appointment = "appointment" in normalized or "appointments" in normalized
+    has_referral = "referral" in normalized or "referrals" in normalized
+    has_negation = any(
+        token in normalized
+        for token in (
+            "no appointment",
+            "no appointments",
+            "do not require",
+            "does not require",
+            "don't require",
+            "dont require",
+            "without appointment",
+            "walk ins welcome",
+            "walk-in",
+            "walk ins",
+        )
+    )
+    return has_negation and (has_appointment or has_referral or "walk" in normalized)
+
+
+def _equivalent_appointment_requirement(entry: dict[str, Any]) -> bool:
+    label = _normalize_fact_text(str(entry.get("label", "")))
+    if "appointment" not in label:
+        return False
+    if any(token in label for token in ("availability", "available", "slot", "schedule")):
+        return False
+    if not any(token in label for token in ("require", "required", "requirement", "necessary", "needed", "referral")):
+        return False
+    return _is_no_appointment_requirement(str(entry.get("old_value", ""))) and _is_no_appointment_requirement(
+        str(entry.get("new_value", ""))
+    )
+
+
+def filter_text_supported_noise(
+    diff: dict[str, list[dict[str, Any]]],
+    previous_snapshot: dict[str, Any] | None,
+    current_snapshot: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Drop extraction drift that contradicts raw page text evidence.
+
+    Knowledge extraction can miss a fact on one run and find it on the next,
+    even when the raw page text did not change materially. Raw snapshots provide
+    a deterministic backstop: a fact is not newly added if its exact value was
+    already present in the previous raw text, and not removed if its value is
+    still present in the current raw text.
+    """
+    result = {
+        "changed": [],
+        "added": [],
+        "removed": [],
+        "unchanged": diff.get("unchanged", []),
+        "noise": list(diff.get("noise", []) or []),
+    }
+
+    for entry in diff.get("changed", []):
+        if _equivalent_appointment_requirement(entry):
+            result["noise"].append({
+                **entry,
+                "_noise_type": "changed",
+                "_noise_reason": "equivalent_appointment_requirement",
+            })
+        else:
+            result["changed"].append(entry)
+
+    for entry in diff.get("added", []):
+        previous_text = _page_text(previous_snapshot, str(entry.get("page", "")))
+        if _value_in_text(str(entry.get("value", "")), previous_text):
+            result["noise"].append({
+                **entry,
+                "_noise_type": "added",
+                "_noise_reason": "value_existed_in_previous_text",
+            })
+        else:
+            result["added"].append(entry)
+
+    for entry in diff.get("removed", []):
+        current_text = _page_text(current_snapshot, str(entry.get("page", "")))
+        if _value_in_text(str(entry.get("value", "")), current_text):
+            result["noise"].append({
+                **entry,
+                "_noise_type": "removed",
+                "_noise_reason": "value_still_in_current_text",
+            })
+        else:
+            result["removed"].append(entry)
+
+    return result
 
 
 # ── Multi-capture quorum ────────────────────────────────────────────────────

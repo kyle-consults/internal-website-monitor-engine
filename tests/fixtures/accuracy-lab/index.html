@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Accuracy Lab Home</title>
+  </head>
+  <body>
+    <header>
+      <nav>
+        <a href="/hours.html">Hours</a>
+        <a href="/billing.html?utm_source=nav">Billing</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="monitor-content">
+        <h1>Clinic Alpha</h1>
+        <p>Phone: 555-0100</p>
+        <p>Hours: 8:30 AM - 5:00 PM</p>
+        <p class="volatile-counter">Visitor count: 1000</p>
+        <p class="volatile-clock">Rendered at: 12:00:00</p>
+        <div class="dynamic-widget">Widget random seed: initial</div>
+        <div class="rotating-promo">Flash sale: should never be monitored</div>
+      </section>
+
+      <aside class="widget">
+        Related article generated at runtime.
+      </aside>
+    </main>
+
+    <script>
+      let counter = 1000;
+      setInterval(() => {
+        counter += 1;
+        const counterNode = document.querySelector(".volatile-counter");
+        const clockNode = document.querySelector(".volatile-clock");
+        const widgetNode = document.querySelector(".dynamic-widget");
+        const promoNode = document.querySelector(".rotating-promo");
+        if (counterNode) counterNode.textContent = `Visitor count: ${counter}`;
+        if (clockNode) clockNode.textContent = `Rendered at: 12:00:${counter % 60}`;
+        if (widgetNode) widgetNode.textContent = `Widget random seed: ${counter}`;
+        if (promoNode) promoNode.textContent = `Flash sale: ${counter}`;
+      }, 50);
+    </script>
+  </body>
+</html>

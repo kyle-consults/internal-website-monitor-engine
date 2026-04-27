@@ -14,7 +14,13 @@ from tempfile import NamedTemporaryFile
 from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urldefrag, urljoin, urlparse
 
-from website_monitor.knowledge import build_gemini_client, extract_all_pages, verify_changes, quorum_verify_changes
+from website_monitor.knowledge import (
+    build_gemini_client,
+    extract_all_pages,
+    filter_text_supported_noise,
+    quorum_verify_changes,
+    verify_changes,
+)
 from website_monitor.knowledge_diff import compare_knowledge
 from website_monitor.knowledge_report import render_knowledge_report, build_knowledge_summary
 from website_monitor.webhook import send_webhook
@@ -1107,6 +1113,11 @@ def run_knowledge_pipeline(
             cfg=cfg,
             captures=2,
             quorum=2,
+        )
+        knowledge_diff = filter_text_supported_noise(
+            knowledge_diff,
+            previous_snapshot=previous_snapshot,
+            current_snapshot=crawl_result,
         )
         # Then LLM verification as a second layer of noise filtering
         still_has_changes = (
