@@ -507,6 +507,177 @@ class TestQuorumVerifyChanges(unittest.TestCase):
         self.assertEqual(len(result["added"]), 0,
                          "Added must be rejected when value was already in previous")
 
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_changed_confirmed_when_new_value_present_under_different_label(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """Genuine change with label drift on recapture: the new value is still
+        present and the old value is absent, even though the model relabeled it.
+        """
+        url = "https://example.com/hours"
+        old_value = "Mon-Fri 9am-5pm"
+        new_value = "Mon-Fri 8am-6pm"
+
+        diff = {
+            "changed": [
+                {
+                    "page": url,
+                    "category": "hours",
+                    "label": "Weekday Hours",
+                    "old_value": old_value,
+                    "new_value": new_value,
+                },
+            ],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekday Hours", "value": new_value, "operational": True},
+        ])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekday Hours", "value": old_value, "operational": True},
+        ])
+
+        mock_extract.return_value = [
+            {"category": "operations", "label": "Business Hours", "value": new_value, "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["changed"]), 1)
+        self.assertEqual(result["changed"][0]["new_value"], new_value)
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_changed_rejected_when_old_value_still_present_under_different_label(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """Phantom change: recapture shows the old value still exists under a
+        drifted label, so the changed candidate should fail quorum.
+        """
+        url = "https://example.com/hours"
+        old_value = "Mon-Fri 9am-5pm"
+        new_value = "Mon-Fri 8am-6pm"
+
+        diff = {
+            "changed": [
+                {
+                    "page": url,
+                    "category": "hours",
+                    "label": "Weekday Hours",
+                    "old_value": old_value,
+                    "new_value": new_value,
+                },
+            ],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekday Hours", "value": new_value, "operational": True},
+        ])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "hours", "label": "Weekday Hours", "value": old_value, "operational": True},
+        ])
+
+        mock_extract.return_value = [
+            {"category": "operations", "label": "Business Hours", "value": old_value, "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["changed"]), 0)
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_changed_confirmed_when_long_new_value_is_similar_to_old_value(
+        self, mock_extract: MagicMock,
+    ) -> None:
+        """A small real edit in a long relabeled value should still pass quorum.
+
+        Regression: fuzzy-checking old_value against the new recaptured value
+        made the verifier think the old fact was still present.
+        """
+        url = "https://example.com/contact"
+        old_value = (
+            "Call our clinic at 555-111-2222 for same-day urgent care appointments, "
+            "walk-in availability, insurance questions, lab services, pediatric "
+            "urgent care, and follow-up instructions after your visit."
+        )
+        new_value = (
+            "Call our clinic at 555-111-3333 for same-day urgent care appointments, "
+            "walk-in availability, insurance questions, lab services, pediatric "
+            "urgent care, and follow-up instructions after your visit."
+        )
+
+        diff = {
+            "changed": [
+                {
+                    "page": url,
+                    "category": "contact",
+                    "label": "Appointment Phone",
+                    "old_value": old_value,
+                    "new_value": new_value,
+                },
+            ],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+        }
+        current_knowledge = self._knowledge(url, [
+            {"category": "contact", "label": "Appointment Phone", "value": new_value, "operational": True},
+        ])
+        previous_knowledge = self._knowledge(url, [
+            {"category": "contact", "label": "Appointment Phone", "value": old_value, "operational": True},
+        ])
+
+        mock_extract.return_value = [
+            {"category": "policy", "label": "Contact Instructions", "value": new_value, "operational": True},
+        ]
+
+        def fake_recrawl(urls, cfg):
+            return {u: {"text": "nonempty"} for u in urls}
+
+        result = quorum_verify_changes(
+            diff=diff,
+            current_knowledge=current_knowledge,
+            previous_knowledge=previous_knowledge,
+            recrawl_fn=fake_recrawl,
+            client=MagicMock(),
+            model="test-model",
+            cfg={},
+            captures=2,
+            quorum=2,
+        )
+
+        self.assertEqual(len(result["changed"]), 1)
+        self.assertEqual(result["changed"][0]["new_value"], new_value)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -486,6 +486,19 @@ def _fact_key(entry: dict[str, Any], change_type: str) -> tuple[str, str, str, s
             entry.get("label", ""))
 
 
+def _value_present(values: list[str], expected: str, threshold: float = 0.85) -> bool:
+    return any(
+        value == expected
+        or SequenceMatcher(None, str(value), str(expected)).ratio() >= threshold
+        for value in values
+    )
+
+
+def _normalized_value_present(values: list[str], expected: str) -> bool:
+    expected_normalized = " ".join(str(expected).split())
+    return any(" ".join(str(value).split()) == expected_normalized for value in values)
+
+
 def quorum_verify_changes(
     diff: dict[str, list[dict[str, Any]]],
     current_knowledge: dict[str, Any],
@@ -580,8 +593,13 @@ def quorum_verify_changes(
                 cap_key = (cat, label)
 
                 if change_type == "changed":
+                    old_val = entry.get("old_value", "")
                     new_val = entry.get("new_value", "")
-                    if new_by_key.get(cap_key) == new_val:
+                    value_in_new = _value_present(new_values, str(new_val), threshold=0.95)
+                    old_value_still_present = _normalized_value_present(new_values, str(old_val))
+                    if new_by_key.get(cap_key) == new_val or (
+                        value_in_new and not old_value_still_present
+                    ):
                         page_change_votes[url][key] += 1
                 elif change_type == "added":
                     val = entry.get("value", "")
@@ -590,16 +608,8 @@ def quorum_verify_changes(
                     # under any label. Label drift on recapture would otherwise
                     # falsely reject real adds because the original (cat, label)
                     # slot holds a different value in the new capture.
-                    value_in_new = any(
-                        v == val
-                        or SequenceMatcher(None, str(v), str(val)).ratio() >= 0.85
-                        for v in new_values
-                    )
-                    value_in_prev = any(
-                        v == val
-                        or SequenceMatcher(None, str(v), str(val)).ratio() >= 0.85
-                        for v in prev_values
-                    )
+                    value_in_new = _value_present(new_values, str(val))
+                    value_in_prev = _value_present(prev_values, str(val))
                     if value_in_new and not value_in_prev:
                         page_change_votes[url][key] += 1
                 elif change_type == "removed":
@@ -610,11 +620,7 @@ def quorum_verify_changes(
                     # because the old (cat, label) slot is empty.
                     if cap_key in new_by_key:
                         continue
-                    value_still_present = any(
-                        v == old_val
-                        or SequenceMatcher(None, str(v), str(old_val)).ratio() >= 0.85
-                        for v in new_values
-                    )
+                    value_still_present = _value_present(new_values, str(old_val))
                     if not value_still_present:
                         page_change_votes[url][key] += 1
 

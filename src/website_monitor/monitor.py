@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Callable
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urldefrag, urljoin, urlparse
 
 from website_monitor.knowledge import build_gemini_client, extract_all_pages, verify_changes, quorum_verify_changes
 from website_monitor.knowledge_diff import compare_knowledge
@@ -84,17 +84,20 @@ def resolve_runtime_root(
     return cwd
 
 
-def get_homepage_url(env: dict[str, str] | None = None) -> str:
+def get_homepage_url(
+    env: dict[str, str] | None = None,
+    keep_query_params: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> str:
     env = env or os.environ
     url = env.get("HOMEPAGE_URL", "").strip()
     if not url:
         raise ConfigurationError("HOMEPAGE_URL is not set.")
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
-    return normalize_url(url)
+    return normalize_url(url, keep_query_params=keep_query_params)
 
 
-def normalize_url(url: str) -> str:
+def normalize_url(url: str, keep_query_params: list[str] | tuple[str, ...] | set[str] | None = None) -> str:
     stripped, _fragment = urldefrag(url)
     parsed = urlparse(stripped)
     scheme = parsed.scheme.lower()
@@ -102,7 +105,19 @@ def normalize_url(url: str) -> str:
     path = parsed.path or "/"
     if path != "/" and path.endswith("/"):
         path = path[:-1]
-    return f"{scheme}://{netloc}{path}"
+    normalized = f"{scheme}://{netloc}{path}"
+
+    if keep_query_params:
+        allowed = {str(param) for param in keep_query_params}
+        kept_pairs = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key in allowed
+        ]
+        if kept_pairs:
+            normalized = f"{normalized}?{urlencode(kept_pairs)}"
+
+    return normalized
 
 
 def should_skip_url(url: str, cfg: dict[str, object], allowed_host: str) -> bool:
@@ -142,9 +157,14 @@ def should_adopt_homepage_redirect_host(current_allowed_host: str, final_host: s
 
 
 def clean_text(text: str) -> str:
+    lines = []
+    for line in str(text or "").splitlines():
+        if re.match(r"^\s*(?:last updated|updated)\b[: ]+.*$", line, flags=re.IGNORECASE):
+            continue
+        lines.append(line)
+
+    text = "\n".join(lines)
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\b\d{1,2}:\d{2}\b", "", text)
-    text = re.sub(r"\b(last updated|updated)\b[: ]+.*?$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^skip to (?:content|main|navigation)\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*©\s*\d{4}\b.*$", "", text)
     text = re.sub(r"\s*Manage consent\s*$", "", text, flags=re.IGNORECASE)
@@ -446,8 +466,40 @@ _BOILERPLATE_SELECTORS = [
 ]
 
 
-def strip_boilerplate_js() -> str:
-    selector_list = ", ".join(f"'{s}'" for s in _BOILERPLATE_SELECTORS)
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _combined_selectors(extra_selectors: object = None) -> list[str]:
+    selectors: list[str] = []
+    seen: set[str] = set()
+    for selector in [*_BOILERPLATE_SELECTORS, *_string_list(extra_selectors)]:
+        if selector not in seen:
+            selectors.append(selector)
+            seen.add(selector)
+    return selectors
+
+
+def _js_string_list(items: list[str]) -> str:
+    return ", ".join(json.dumps(item) for item in items)
+
+
+def apply_ignore_text_patterns(text: str, patterns: object = None) -> str:
+    cleaned = str(text or "")
+    for pattern in _string_list(patterns):
+        try:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        except re.error:
+            continue
+    return cleaned
+
+
+def strip_boilerplate_js(extra_selectors: object = None) -> str:
+    selector_list = _js_string_list(_combined_selectors(extra_selectors))
     return (
         f"for (const sel of [{selector_list}]) {{"
         "  document.querySelectorAll(sel).forEach(el => el.remove());"
@@ -455,9 +507,70 @@ def strip_boilerplate_js() -> str:
     )
 
 
-def extract_primary_text(page) -> str:
+def primary_text_snapshot_js(
+    *,
+    include_selectors: object = None,
+    exclude_selectors: object = None,
+) -> str:
+    selector_list = _js_string_list(_combined_selectors(exclude_selectors))
+    semantic_selector_list = _js_string_list(
+        [
+            *_string_list(include_selectors),
+            "main article",
+            "main",
+            "[role='main']",
+            "article",
+        ]
+    )
+    return (
+        "() => {"
+        f"  const semanticSelectors = [{semantic_selector_list}];"
+        f"  const boilerplateSelectors = [{selector_list}];"
+        "  let source = null;"
+        "  for (const sel of semanticSelectors) {"
+        "    source = document.querySelector(sel);"
+        "    if (source) break;"
+        "  }"
+        "  if (!source) source = document.body;"
+        "  if (!source) return '';"
+        "  const clone = source.cloneNode(true);"
+        "  for (const sel of boilerplateSelectors) {"
+        "    clone.querySelectorAll(sel).forEach(el => el.remove());"
+        "  }"
+        "  return clone.innerText || clone.textContent || '';"
+        "}"
+    )
+
+
+def extract_primary_text_snapshot(
+    page,
+    *,
+    include_selectors: object = None,
+    exclude_selectors: object = None,
+    ignore_text_patterns: object = None,
+) -> str:
+    """Read primary content from a cloned DOM so stabilization cannot remove links."""
     try:
-        page.evaluate(strip_boilerplate_js())
+        text = page.evaluate(
+            primary_text_snapshot_js(
+                include_selectors=include_selectors,
+                exclude_selectors=exclude_selectors,
+            )
+        )
+        return clean_text(apply_ignore_text_patterns(text, ignore_text_patterns))
+    except Exception:
+        return ""
+
+
+def extract_primary_text(
+    page,
+    *,
+    include_selectors: object = None,
+    exclude_selectors: object = None,
+    ignore_text_patterns: object = None,
+) -> str:
+    try:
+        page.evaluate(strip_boilerplate_js(extra_selectors=exclude_selectors))
     except Exception:
         pass
 
@@ -473,6 +586,7 @@ def extract_primary_text(page) -> str:
     #    racy. The boilerplate strip removes nav/sidebar/widget patterns
     #    before we get here.
     semantic_selectors = [
+        *_string_list(include_selectors),
         "main article",
         "main",
         "[role='main']",
@@ -494,7 +608,7 @@ def extract_primary_text(page) -> str:
         except Exception:
             return ""
 
-        return clean_text(text)
+        return clean_text(apply_ignore_text_patterns(text, ignore_text_patterns))
 
     try:
         body_locator = page.locator("body")
@@ -504,7 +618,7 @@ def extract_primary_text(page) -> str:
     except Exception:
         return ""
 
-    return clean_text(body_text)
+    return clean_text(apply_ignore_text_patterns(body_text, ignore_text_patterns))
 
 
 def diff_size_chars(previous_page: dict[str, object], current_page: dict[str, object]) -> int:
@@ -779,7 +893,8 @@ def wait_for_content_stable(
             last_text = current_text
 
 
-def extract_page_data(page, page_url: str) -> dict[str, object]:
+def extract_page_data(page, page_url: str, cfg: dict[str, object] | None = None) -> dict[str, object]:
+    cfg = cfg or {}
     title = ""
     try:
         title = page.title() or ""
@@ -792,7 +907,12 @@ def extract_page_data(page, page_url: str) -> dict[str, object]:
     except Exception:
         headings = []
 
-    cleaned_body = extract_primary_text(page)
+    cleaned_body = extract_primary_text(
+        page,
+        include_selectors=cfg.get("content_include_selectors", []),
+        exclude_selectors=cfg.get("content_exclude_selectors", []),
+        ignore_text_patterns=cfg.get("ignore_text_patterns", []),
+    )
     return {
         "url": page_url,
         "title": clean_text(title),
@@ -802,7 +922,11 @@ def extract_page_data(page, page_url: str) -> dict[str, object]:
     }
 
 
-def discover_links(page, base_url: str) -> list[str]:
+def discover_links(
+    page,
+    base_url: str,
+    keep_query_params: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[str]:
     try:
         hrefs = page.locator("a[href]").evaluate_all("(nodes) => nodes.map((node) => node.getAttribute('href'))")
     except Exception:
@@ -812,7 +936,7 @@ def discover_links(page, base_url: str) -> list[str]:
     for href in hrefs:
         if not href or href == "None":
             continue
-        links.append(normalize_url(urljoin(base_url, href)))
+        links.append(normalize_url(urljoin(base_url, href), keep_query_params=keep_query_params))
     return links
 
 
@@ -822,13 +946,14 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
     except ImportError as exc:
         raise RuntimeError("Playwright is not installed. Install dependencies before running the scanner.") from exc
 
+    max_pages = int(cfg.get("max_pages", 100))
+    timeout_ms = int(cfg.get("request_timeout_ms", 30000))
+    keep_query_params = cfg.get("keep_url_query_params", [])
     allowed_host = urlparse(homepage_url).netloc.lower()
-    homepage_seed = normalize_url(homepage_url)
+    homepage_seed = normalize_url(homepage_url, keep_query_params=keep_query_params)
     queue: deque[str] = deque([homepage_seed])
     seen: set[str] = set()
     pages: dict[str, dict[str, object]] = {}
-    max_pages = int(cfg.get("max_pages", 100))
-    timeout_ms = int(cfg.get("request_timeout_ms", 30000))
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -846,18 +971,26 @@ def crawl(homepage_url: str, cfg: dict[str, object]) -> dict[str, object]:
                 page = context.new_page()
                 try:
                     response = page.goto(url, wait_until="load", timeout=timeout_ms)
-                    final_url = normalize_url(page.url)
+                    final_url = normalize_url(page.url, keep_query_params=keep_query_params)
                     final_host = urlparse(final_url).netloc.lower()
                     if url == homepage_seed and should_adopt_homepage_redirect_host(allowed_host, final_host, len(pages)):
                         allowed_host = final_host
                     if should_skip_url(final_url, cfg, allowed_host):
                         continue
 
-                    wait_for_content_stable(page, text_fn=extract_primary_text)
+                    wait_for_content_stable(
+                        page,
+                        text_fn=lambda p: extract_primary_text_snapshot(
+                            p,
+                            include_selectors=cfg.get("content_include_selectors", []),
+                            exclude_selectors=cfg.get("content_exclude_selectors", []),
+                            ignore_text_patterns=cfg.get("ignore_text_patterns", []),
+                        ),
+                    )
 
-                    discovered_links = discover_links(page, final_url)
+                    discovered_links = discover_links(page, final_url, keep_query_params=keep_query_params)
 
-                    page_data = extract_page_data(page, final_url)
+                    page_data = extract_page_data(page, final_url, cfg=cfg)
                     page_data["status"] = response.status if response else None
                     pages[final_url] = page_data
 
@@ -906,6 +1039,7 @@ def recrawl_urls(urls: list[str], cfg: dict[str, object]) -> dict[str, dict[str,
         raise RuntimeError("Playwright is not installed. Install dependencies before running the scanner.") from exc
 
     timeout_ms = int(cfg.get("request_timeout_ms", 30000))
+    keep_query_params = cfg.get("keep_url_query_params", [])
     verified: dict[str, dict[str, object]] = {}
 
     with sync_playwright() as playwright:
@@ -916,9 +1050,17 @@ def recrawl_urls(urls: list[str], cfg: dict[str, object]) -> dict[str, dict[str,
                 page = context.new_page()
                 try:
                     response = page.goto(url, wait_until="load", timeout=timeout_ms)
-                    wait_for_content_stable(page, text_fn=extract_primary_text)
-                    final_url = normalize_url(page.url)
-                    page_data = extract_page_data(page, final_url)
+                    wait_for_content_stable(
+                        page,
+                        text_fn=lambda p: extract_primary_text_snapshot(
+                            p,
+                            include_selectors=cfg.get("content_include_selectors", []),
+                            exclude_selectors=cfg.get("content_exclude_selectors", []),
+                            ignore_text_patterns=cfg.get("ignore_text_patterns", []),
+                        ),
+                    )
+                    final_url = normalize_url(page.url, keep_query_params=keep_query_params)
+                    page_data = extract_page_data(page, final_url, cfg=cfg)
                     page_data["status"] = response.status if response else None
                     verified[url] = page_data
                 except Exception:
@@ -989,7 +1131,7 @@ def run_monitor(
 ) -> dict[str, object]:
     cfg = load_config(paths)
     env = env or os.environ
-    homepage_url = get_homepage_url(env)
+    homepage_url = get_homepage_url(env, keep_query_params=cfg.get("keep_url_query_params", []))
     previous = load_previous_snapshot(paths)
     current = (crawl_fn or crawl)(homepage_url, cfg)
     baseline_created = previous is None
