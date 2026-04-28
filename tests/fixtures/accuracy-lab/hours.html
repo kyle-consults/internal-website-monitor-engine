@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Accuracy Lab Hours</title>
+  </head>
+  <body>
+    <main>
+      <article class="monitor-content">
+        <h1>Hours</h1>
+        <p>Weekday Hours: Monday-Friday 8:30 AM - 5:00 PM</p>
+        <p>Weekend Hours: Saturday 9:00 AM - 1:00 PM</p>
+        <div class="dynamic-widget">Widget random seed: initial</div>
+      </article>
+    </main>
+
+    <script>
+      let counter = 2000;
+      setInterval(() => {
+        counter += 1;
+        const widgetNode = document.querySelector(".dynamic-widget");
+        if (widgetNode) widgetNode.textContent = `Widget random seed: ${counter}`;
+      }, 50);
+    </script>
+  </body>
+</html>

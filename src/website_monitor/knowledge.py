@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -234,9 +235,10 @@ def extract_all_pages(
 ) -> dict[str, Any]:
     """Extract knowledge from all pages in a crawl result, with hash gating.
 
-    If a page's hash matches the previous snapshot, its prior knowledge is
-    reused instead of calling Gemini again.  Changed or new pages are
-    extracted in parallel via a thread pool.
+    If a page's current hash matches the source_hash recorded in the previous
+    knowledge snapshot, its prior knowledge is reused instead of calling
+    Gemini again.  Changed or new pages are extracted in parallel via a
+    thread pool.
 
     Returns a knowledge snapshot dict::
 
@@ -251,7 +253,6 @@ def extract_all_pages(
     from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime, timezone
 
-    prev_pages = (previous_snapshot or {}).get("pages", {})
     prev_knowledge_pages = (previous_knowledge or {}).get("pages", {})
     current_pages = crawl_result.get("pages", {})
 
@@ -261,14 +262,15 @@ def extract_all_pages(
 
     for url, page_data in current_pages.items():
         current_hash = page_data.get("hash", "")
-        previous_hash = prev_pages.get(url, {}).get("hash", "")
+        knowledge_page = prev_knowledge_pages.get(url, {})
+        knowledge_source_hash = knowledge_page.get("source_hash", "")
 
         if (
             current_hash
-            and current_hash == previous_hash
-            and url in prev_knowledge_pages
+            and knowledge_source_hash
+            and current_hash == knowledge_source_hash
         ):
-            cached[url] = prev_knowledge_pages[url].get("knowledge_units", [])
+            cached[url] = knowledge_page.get("knowledge_units", [])
         else:
             to_extract[url] = str(page_data.get("text", ""))
 
@@ -298,10 +300,11 @@ def extract_all_pages(
     # Assemble result
     pages_out: dict[str, dict[str, Any]] = {}
     for url in current_pages:
+        page_hash = current_pages[url].get("hash", "")
         if url in cached:
-            pages_out[url] = {"url": url, "knowledge_units": cached[url]}
+            pages_out[url] = {"url": url, "source_hash": page_hash, "knowledge_units": cached[url]}
         else:
-            pages_out[url] = {"url": url, "knowledge_units": extracted.get(url, [])}
+            pages_out[url] = {"url": url, "source_hash": page_hash, "knowledge_units": extracted.get(url, [])}
 
     return {
         "schema_version": 1,
@@ -474,6 +477,132 @@ def verify_changes(
     }
 
 
+def _normalize_fact_text(value: str) -> str:
+    normalized = str(value or "").lower()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = re.sub(r"[^a-z0-9$%:/.'-]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip(" .")
+
+
+def _value_in_text(value: str, text: str) -> bool:
+    normalized_value = _normalize_fact_text(value)
+    if not normalized_value:
+        return False
+    normalized_text = _normalize_fact_text(text)
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized_value)}(?![a-z0-9])"
+    return re.search(pattern, normalized_text) is not None
+
+
+def _page_text(snapshot: dict[str, Any] | None, url: str) -> str:
+    page = ((snapshot or {}).get("pages", {}) or {}).get(url, {})
+    if not isinstance(page, dict):
+        return ""
+    return str(page.get("text", ""))
+
+
+def _is_no_appointment_requirement(value: str) -> bool:
+    normalized = _normalize_fact_text(value)
+    if any(
+        token in normalized
+        for token in (
+            "no appointment available",
+            "no appointments available",
+            "appointment unavailable",
+            "appointments unavailable",
+        )
+    ):
+        return False
+    if normalized in {"no", "none", "not required", "not needed"}:
+        return True
+    has_appointment = "appointment" in normalized or "appointments" in normalized
+    has_referral = "referral" in normalized or "referrals" in normalized
+    has_negation = any(
+        token in normalized
+        for token in (
+            "no appointment",
+            "no appointments",
+            "do not require",
+            "does not require",
+            "don't require",
+            "dont require",
+            "without appointment",
+            "walk ins welcome",
+            "walk-in",
+            "walk ins",
+        )
+    )
+    return has_negation and (has_appointment or has_referral or "walk" in normalized)
+
+
+def _equivalent_appointment_requirement(entry: dict[str, Any]) -> bool:
+    label = _normalize_fact_text(str(entry.get("label", "")))
+    if "appointment" not in label:
+        return False
+    if any(token in label for token in ("availability", "available", "slot", "schedule")):
+        return False
+    if not any(token in label for token in ("require", "required", "requirement", "necessary", "needed", "referral")):
+        return False
+    return _is_no_appointment_requirement(str(entry.get("old_value", ""))) and _is_no_appointment_requirement(
+        str(entry.get("new_value", ""))
+    )
+
+
+def filter_text_supported_noise(
+    diff: dict[str, list[dict[str, Any]]],
+    previous_snapshot: dict[str, Any] | None,
+    current_snapshot: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Drop extraction drift that contradicts raw page text evidence.
+
+    Knowledge extraction can miss a fact on one run and find it on the next,
+    even when the raw page text did not change materially. Raw snapshots provide
+    a deterministic backstop: a fact is not newly added if its exact value was
+    already present in the previous raw text, and not removed if its value is
+    still present in the current raw text.
+    """
+    result = {
+        "changed": [],
+        "added": [],
+        "removed": [],
+        "unchanged": diff.get("unchanged", []),
+        "noise": list(diff.get("noise", []) or []),
+    }
+
+    for entry in diff.get("changed", []):
+        if _equivalent_appointment_requirement(entry):
+            result["noise"].append({
+                **entry,
+                "_noise_type": "changed",
+                "_noise_reason": "equivalent_appointment_requirement",
+            })
+        else:
+            result["changed"].append(entry)
+
+    for entry in diff.get("added", []):
+        previous_text = _page_text(previous_snapshot, str(entry.get("page", "")))
+        if _value_in_text(str(entry.get("value", "")), previous_text):
+            result["noise"].append({
+                **entry,
+                "_noise_type": "added",
+                "_noise_reason": "value_existed_in_previous_text",
+            })
+        else:
+            result["added"].append(entry)
+
+    for entry in diff.get("removed", []):
+        current_text = _page_text(current_snapshot, str(entry.get("page", "")))
+        if _value_in_text(str(entry.get("value", "")), current_text):
+            result["noise"].append({
+                **entry,
+                "_noise_type": "removed",
+                "_noise_reason": "value_still_in_current_text",
+            })
+        else:
+            result["removed"].append(entry)
+
+    return result
+
+
 # ── Multi-capture quorum ────────────────────────────────────────────────────
 
 
@@ -484,6 +613,19 @@ def _fact_key(entry: dict[str, Any], change_type: str) -> tuple[str, str, str, s
                 entry.get("label", ""))
     return (change_type, entry.get("page", ""), entry.get("category", ""),
             entry.get("label", ""))
+
+
+def _value_present(values: list[str], expected: str, threshold: float = 0.85) -> bool:
+    return any(
+        value == expected
+        or SequenceMatcher(None, str(value), str(expected)).ratio() >= threshold
+        for value in values
+    )
+
+
+def _normalized_value_present(values: list[str], expected: str) -> bool:
+    expected_normalized = " ".join(str(expected).split())
+    return any(" ".join(str(value).split()) == expected_normalized for value in values)
 
 
 def quorum_verify_changes(
@@ -580,8 +722,13 @@ def quorum_verify_changes(
                 cap_key = (cat, label)
 
                 if change_type == "changed":
+                    old_val = entry.get("old_value", "")
                     new_val = entry.get("new_value", "")
-                    if new_by_key.get(cap_key) == new_val:
+                    value_in_new = _value_present(new_values, str(new_val), threshold=0.95)
+                    old_value_still_present = _normalized_value_present(new_values, str(old_val))
+                    if new_by_key.get(cap_key) == new_val or (
+                        value_in_new and not old_value_still_present
+                    ):
                         page_change_votes[url][key] += 1
                 elif change_type == "added":
                     val = entry.get("value", "")
@@ -590,16 +737,8 @@ def quorum_verify_changes(
                     # under any label. Label drift on recapture would otherwise
                     # falsely reject real adds because the original (cat, label)
                     # slot holds a different value in the new capture.
-                    value_in_new = any(
-                        v == val
-                        or SequenceMatcher(None, str(v), str(val)).ratio() >= 0.85
-                        for v in new_values
-                    )
-                    value_in_prev = any(
-                        v == val
-                        or SequenceMatcher(None, str(v), str(val)).ratio() >= 0.85
-                        for v in prev_values
-                    )
+                    value_in_new = _value_present(new_values, str(val))
+                    value_in_prev = _value_present(prev_values, str(val))
                     if value_in_new and not value_in_prev:
                         page_change_votes[url][key] += 1
                 elif change_type == "removed":
@@ -610,11 +749,7 @@ def quorum_verify_changes(
                     # because the old (cat, label) slot is empty.
                     if cap_key in new_by_key:
                         continue
-                    value_still_present = any(
-                        v == old_val
-                        or SequenceMatcher(None, str(v), str(old_val)).ratio() >= 0.85
-                        for v in new_values
-                    )
+                    value_still_present = _value_present(new_values, str(old_val))
                     if not value_still_present:
                         page_change_votes[url][key] += 1
 
