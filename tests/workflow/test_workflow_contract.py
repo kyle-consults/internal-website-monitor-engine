@@ -41,7 +41,7 @@ class WorkflowContractTests(unittest.TestCase):
         workflow_text = (ROOT / ".github" / "workflows" / "reusable-monitor.yml").read_text(encoding="utf-8")
 
         self.assertIn(
-            "if: ${{ inputs.alert_email_to != '' && inputs.alert_email_from != '' && env.RESEND_API_KEY != '' }}",
+            "if: ${{ always() && inputs.alert_email_to != '' && inputs.alert_email_from != '' && env.RESEND_API_KEY != '' }}",
             workflow_text,
         )
 
@@ -52,7 +52,7 @@ class WorkflowContractTests(unittest.TestCase):
             workflow_text.index("- name: Commit updated outputs"),
             workflow_text.index("- name: Send email notification"),
         )
-        self.assertIn('git pull --rebase origin "${GITHUB_REF_NAME}"', workflow_text)
+        self.assertIn('git pull --rebase --autostash origin "${GITHUB_REF_NAME}"', workflow_text)
         self.assertIn('git push origin HEAD:"${GITHUB_REF_NAME}"', workflow_text)
 
     def test_reusable_workflow_wires_optional_gemini_api_key(self) -> None:

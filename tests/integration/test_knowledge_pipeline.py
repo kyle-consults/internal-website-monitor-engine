@@ -430,5 +430,139 @@ class TestFirstKnowledgeRunOnExistingSiteCreatesBaseline(unittest.TestCase):
         self.assertIn("baseline", report_text.lower())
 
 
+class TestAfcStyleFalsePositiveFiltering(unittest.TestCase):
+    """Regression coverage for unchanged pages where Gemini extraction drifts."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        (self.root / "config").mkdir()
+        (self.root / "reports").mkdir()
+        (self.root / "snapshots").mkdir()
+        (self.root / "config" / "defaults.json").write_text(
+            json.dumps({
+                "max_pages": 10,
+                "request_timeout_ms": 5000,
+                "archive_retention": 3,
+                "gemini_model": "gemini-2.0-flash-lite",
+            }),
+            encoding="utf-8",
+        )
+        self.paths = MonitorPaths.for_root(self.root)
+        self.env = {"HOMEPAGE_URL": HOMEPAGE}
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_raw_text_evidence_filters_extraction_drift_before_llm_verify(self):
+        urgent_url = f"{HOMEPAGE}/patient-services/urgent-care"
+        program_url = f"{HOMEPAGE}/santa-clara/resources/scusd-student-program"
+        insurance_policy = (
+            "Patient insurance isn't necessary to be seen and treated. "
+            "We accept all patients regardless of insurance type or status."
+        )
+        unchanged_snapshot = _make_snapshot({
+            urgent_url: {
+                "url": urgent_url,
+                "title": "Urgent Care",
+                "h1": "Urgent Care",
+                "text": "You don't need an appointment or a primary care referral.",
+                "hash": "urgent-same",
+                "status": 200,
+            },
+            program_url: {
+                "url": program_url,
+                "title": "SCUSD Student Program",
+                "h1": "SCUSD Student Program",
+                "text": f"Program details. {insurance_policy}",
+                "hash": "program-same",
+                "status": 200,
+            },
+        })
+        previous_knowledge = _make_knowledge({
+            urgent_url: {
+                "url": urgent_url,
+                "knowledge_units": [
+                    {
+                        "label": "Appointment Requirement",
+                        "value": "No",
+                        "category": "policy",
+                        "operational": True,
+                    },
+                ],
+            },
+            program_url: {
+                "url": program_url,
+                "knowledge_units": [],
+            },
+        })
+        current_knowledge = _make_knowledge({
+            urgent_url: {
+                "url": urgent_url,
+                "knowledge_units": [
+                    {
+                        "label": "Appointment Requirement",
+                        "value": "do not require appointments or referrals",
+                        "category": "policy",
+                        "operational": True,
+                    },
+                ],
+            },
+            program_url: {
+                "url": program_url,
+                "knowledge_units": [
+                    {
+                        "label": "Insurance Policy",
+                        "value": insurance_policy,
+                        "category": "policy",
+                        "operational": True,
+                    },
+                ],
+            },
+        })
+        raw_diff = {
+            "changed": [
+                {
+                    "page": urgent_url,
+                    "category": "policy",
+                    "label": "Appointment Requirement",
+                    "old_value": "No",
+                    "new_value": "do not require appointments or referrals",
+                },
+            ],
+            "added": [
+                {
+                    "page": program_url,
+                    "category": "policy",
+                    "label": "Insurance Policy",
+                    "value": insurance_policy,
+                },
+            ],
+            "removed": [],
+            "unchanged": [],
+        }
+
+        self.paths.latest_snapshot.write_text(json.dumps(unchanged_snapshot), encoding="utf-8")
+        self.paths.latest_knowledge.write_text(json.dumps(previous_knowledge), encoding="utf-8")
+
+        with patch("website_monitor.monitor.extract_all_pages", return_value=current_knowledge), \
+             patch("website_monitor.monitor.compare_knowledge", return_value=raw_diff), \
+             patch("website_monitor.monitor.quorum_verify_changes", side_effect=lambda diff, **kwargs: diff), \
+             patch("website_monitor.monitor.verify_changes", side_effect=lambda diff, *a, **kw: diff) as mock_verify:
+            result = run_monitor(
+                paths=self.paths,
+                env=self.env,
+                crawl_fn=lambda _url, _cfg: unchanged_snapshot,
+                archive_timestamp="afc-regression",
+                gemini_client=MagicMock(),
+            )
+
+        mock_verify.assert_not_called()
+        self.assertFalse(result["summary"]["changes_detected"])
+        self.assertEqual(result["diff"]["changed"], [])
+        self.assertEqual(result["diff"]["added"], [])
+        self.assertEqual(len(result["diff"]["noise"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

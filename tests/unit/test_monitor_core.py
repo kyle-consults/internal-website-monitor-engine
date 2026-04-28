@@ -12,6 +12,8 @@ from website_monitor.monitor import (  # noqa: E402
     compare_snapshots,
     discover_links,
     extract_page_data,
+    extract_primary_text_snapshot,
+    get_homepage_url,
     normalize_url,
     prune_archives,
     reconcile_verified_changes,
@@ -30,6 +32,22 @@ class MonitorCoreTests(unittest.TestCase):
         normalized = normalize_url("HTTPS://Example.com/path/#section")
 
         self.assertEqual(normalized, "https://example.com/path")
+
+    def test_normalize_url_preserves_only_configured_query_params(self) -> None:
+        normalized = normalize_url(
+            "https://Example.com/search/?utm_source=x&location=san-jose&page=2#results",
+            keep_query_params=["location", "page"],
+        )
+
+        self.assertEqual(normalized, "https://example.com/search?location=san-jose&page=2")
+
+    def test_get_homepage_url_preserves_configured_query_params_for_initial_seed(self) -> None:
+        homepage = get_homepage_url(
+            {"HOMEPAGE_URL": "example.com/locations?zip=95050&utm_source=ad"},
+            keep_query_params=["zip"],
+        )
+
+        self.assertEqual(homepage, "https://example.com/locations?zip=95050")
 
     def test_should_skip_url_blocks_external_and_binary_targets(self) -> None:
         cfg = {
@@ -248,6 +266,11 @@ class MonitorCoreTests(unittest.TestCase):
         for pattern in ("sidebar", "widget", "recent", "related", "menu"):
             self.assertIn(pattern, js_snippet)
 
+    def test_strip_boilerplate_js_includes_configured_exclude_selectors(self) -> None:
+        js_snippet = strip_boilerplate_js(extra_selectors=[".dynamic-widget"])
+
+        self.assertIn(".dynamic-widget", js_snippet)
+
     def test_extract_page_data_strips_boilerplate_before_extracting_text(self) -> None:
         page = FakePageWithEvaluate(
             title="About Us",
@@ -260,6 +283,41 @@ class MonitorCoreTests(unittest.TestCase):
 
         self.assertEqual(page_data["text"], "Main content here.")
 
+    def test_extract_page_data_uses_configured_include_selector_first(self) -> None:
+        page = FakePage(
+            title="Locations",
+            text_by_selector={
+                ".monitor-content": "Specific monitored content.",
+                "main": "Generic page content with widgets.",
+            },
+            headings=["Locations"],
+        )
+
+        page_data = extract_page_data(
+            page,
+            "https://example.com/locations",
+            cfg={"content_include_selectors": [".monitor-content"]},
+        )
+
+        self.assertEqual(page_data["text"], "Specific monitored content.")
+
+    def test_extract_page_data_applies_configured_ignore_text_patterns(self) -> None:
+        page = FakePage(
+            title="Home",
+            text_by_selector={
+                "main": "Stable content. Visitor count: 12345",
+            },
+            headings=["Home"],
+        )
+
+        page_data = extract_page_data(
+            page,
+            "https://example.com/",
+            cfg={"ignore_text_patterns": [r"Visitor count: \d+"]},
+        )
+
+        self.assertEqual(page_data["text"], "Stable content.")
+
     def test_clean_text_strips_skip_to_content(self) -> None:
         self.assertEqual(clean_text("Skip to content Main content here."), "Main content here.")
         self.assertEqual(clean_text("Skip to main Main content here."), "Main content here.")
@@ -270,6 +328,18 @@ class MonitorCoreTests(unittest.TestCase):
 
     def test_clean_text_strips_manage_consent_text(self) -> None:
         self.assertEqual(clean_text("Hello world. Manage consent"), "Hello world.")
+
+    def test_clean_text_preserves_operational_times(self) -> None:
+        self.assertEqual(
+            clean_text("Hours: 8:30 AM - 5:00 PM"),
+            "Hours: 8:30 AM - 5:00 PM",
+        )
+
+    def test_clean_text_removes_standalone_updated_lines_without_eating_content(self) -> None:
+        self.assertEqual(
+            clean_text("Updated: April 1, 2026\nHours: 8:30 AM - 5:00 PM"),
+            "Hours: 8:30 AM - 5:00 PM",
+        )
 
     def test_compare_snapshots_ignores_near_identical_pages(self) -> None:
         previous = {
@@ -381,6 +451,21 @@ class MonitorCoreTests(unittest.TestCase):
         self.assertIn("https://example.com/contact", links)
         for link in links:
             self.assertNotIn("None", link)
+
+    def test_discover_links_preserves_configured_query_params(self) -> None:
+        page = FakePageWithLinks(hrefs=["/locations?zip=95050&utm_source=ad"])
+
+        links = discover_links(page, "https://example.com/", keep_query_params=["zip"])
+
+        self.assertEqual(links, ["https://example.com/locations?zip=95050"])
+
+    def test_extract_primary_text_snapshot_does_not_mutate_dom(self) -> None:
+        page = FakeSnapshotPage(snapshot_text="Main content.", stripped_text="Stripped main content.")
+
+        text = extract_primary_text_snapshot(page)
+
+        self.assertEqual(text, "Main content.")
+        self.assertFalse(page._stripped)
 
     def test_extract_page_data_does_not_break_link_discovery(self) -> None:
         page = FakePageWithEvaluate(
@@ -962,6 +1047,24 @@ class FakePageWithEvaluate:
             return FakeLocator(headings=self._headings)
         if selector == "main" and self._stripped:
             return FakeLocator(text=self._body_after_strip, count=1)
+        return FakeLocator(text=None, count=0)
+
+
+class FakeSnapshotPage:
+    def __init__(self, snapshot_text: str, stripped_text: str) -> None:
+        self._snapshot_text = snapshot_text
+        self._stripped_text = stripped_text
+        self._stripped = False
+
+    def evaluate(self, expression: str) -> str:
+        if "cloneNode" in expression:
+            return self._snapshot_text
+        self._stripped = True
+        return ""
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector == "main" and self._stripped:
+            return FakeLocator(text=self._stripped_text, count=1)
         return FakeLocator(text=None, count=0)
 
 
