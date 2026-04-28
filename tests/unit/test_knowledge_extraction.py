@@ -47,9 +47,11 @@ class TestExtractAllPages(unittest.TestCase):
         previous_knowledge = {
             "pages": {
                 "https://example.com/": {
+                    "source_hash": "aaa",
                     "knowledge_units": [{"label": "Cached fact", "value": "cached value", "category": "hours", "operational": True}],
                 },
                 "https://example.com/about": {
+                    "source_hash": "bbb-old",
                     "knowledge_units": [{"label": "Old about", "value": "old value", "category": "background", "operational": False}],
                 },
             },
@@ -140,6 +142,150 @@ class TestExtractAllPages(unittest.TestCase):
         )
 
     @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_source_hash_provenance_mismatch_triggers_extraction(self, mock_extract: MagicMock) -> None:
+        """When the raw snapshot hash matches but knowledge was extracted from a
+        different hash, the page must be re-extracted (not cached)."""
+        mock_extract.return_value = [{"label": "Fresh", "value": "fresh val", "category": "info", "operational": True}]
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "New content", "hash": "bbb"},
+            },
+        }
+        previous_snapshot = {
+            "pages": {
+                "https://example.com/": {"hash": "bbb"},
+            },
+        }
+        previous_knowledge = {
+            "pages": {
+                "https://example.com/": {
+                    "source_hash": "aaa",
+                    "knowledge_units": [{"label": "Stale", "value": "stale val", "category": "info", "operational": True}],
+                },
+            },
+        }
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        mock_extract.assert_called_once()
+        self.assertEqual(
+            result["pages"]["https://example.com/"]["knowledge_units"],
+            [{"label": "Fresh", "value": "fresh val", "category": "info", "operational": True}],
+        )
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_source_hash_match_reuses_cache(self, mock_extract: MagicMock) -> None:
+        """When source_hash matches current hash, knowledge is cached (no extraction)."""
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Same content", "hash": "aaa"},
+            },
+        }
+        previous_snapshot = {
+            "pages": {
+                "https://example.com/": {"hash": "aaa"},
+            },
+        }
+        previous_knowledge = {
+            "pages": {
+                "https://example.com/": {
+                    "source_hash": "aaa",
+                    "knowledge_units": [{"label": "Cached", "value": "cached val", "category": "info", "operational": True}],
+                },
+            },
+        }
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        mock_extract.assert_not_called()
+        self.assertEqual(
+            result["pages"]["https://example.com/"]["knowledge_units"],
+            [{"label": "Cached", "value": "cached val", "category": "info", "operational": True}],
+        )
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_legacy_knowledge_without_source_hash_triggers_extraction(self, mock_extract: MagicMock) -> None:
+        """Legacy knowledge pages without source_hash must be re-extracted."""
+        mock_extract.return_value = [{"label": "Reextracted", "value": "new val", "category": "info", "operational": True}]
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Content", "hash": "aaa"},
+            },
+        }
+        previous_snapshot = {
+            "pages": {
+                "https://example.com/": {"hash": "aaa"},
+            },
+        }
+        previous_knowledge = {
+            "pages": {
+                "https://example.com/": {
+                    "knowledge_units": [{"label": "Legacy", "value": "old val", "category": "info", "operational": True}],
+                },
+            },
+        }
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        mock_extract.assert_called_once()
+        self.assertEqual(
+            result["pages"]["https://example.com/"]["knowledge_units"],
+            [{"label": "Reextracted", "value": "new val", "category": "info", "operational": True}],
+        )
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
+    def test_output_pages_include_source_hash(self, mock_extract: MagicMock) -> None:
+        """Output knowledge pages must include source_hash from the crawl."""
+        mock_extract.return_value = [{"label": "Fact", "value": "val", "category": "info", "operational": True}]
+
+        crawl_result = {
+            "homepage_url": "https://example.com",
+            "pages": {
+                "https://example.com/": {"text": "Home text", "hash": "aaa"},
+                "https://example.com/about": {"text": "About text", "hash": "bbb"},
+            },
+        }
+        previous_snapshot = {
+            "pages": {
+                "https://example.com/": {"hash": "aaa"},
+            },
+        }
+        previous_knowledge = {
+            "pages": {
+                "https://example.com/": {
+                    "source_hash": "aaa",
+                    "knowledge_units": [{"label": "Cached", "value": "cached val", "category": "info", "operational": True}],
+                },
+            },
+        }
+
+        client = MagicMock()
+        result = extract_all_pages(
+            crawl_result, client, "gemini-2.0-flash-lite",
+            previous_snapshot, previous_knowledge,
+        )
+
+        self.assertEqual(result["pages"]["https://example.com/"]["source_hash"], "aaa")
+        self.assertEqual(result["pages"]["https://example.com/about"]["source_hash"], "bbb")
+
+    @patch("website_monitor.knowledge.extract_page_knowledge")
     def test_removed_page_absent_from_result(self, mock_extract: MagicMock) -> None:
         """A page in previous but not in current crawl is absent from the result."""
         crawl_result = {
@@ -157,9 +303,11 @@ class TestExtractAllPages(unittest.TestCase):
         previous_knowledge = {
             "pages": {
                 "https://example.com/": {
+                    "source_hash": "aaa",
                     "knowledge_units": [{"label": "Cached", "value": "cached val", "category": "info", "operational": True}],
                 },
                 "https://example.com/old-page": {
+                    "source_hash": "zzz",
                     "knowledge_units": [{"label": "Gone", "value": "gone val", "category": "info", "operational": True}],
                 },
             },

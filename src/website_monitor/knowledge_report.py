@@ -34,7 +34,6 @@ def render_knowledge_report(
     changed = diff.get("changed", [])
     added = diff.get("added", [])
     removed = diff.get("removed", [])
-    noise = diff.get("noise", [])
     total_changes = len(changed) + len(added) + len(removed)
 
     html = """\
@@ -176,19 +175,6 @@ def render_knowledge_report(
     padding-left: 12px;
     margin-bottom: 24px;
   }
-  .noise-section {
-    margin-top: 40px;
-    padding-top: 20px;
-    border-top: 1px solid #f0f0f0;
-  }
-  .noise-section h2 {
-    color: #999;
-  }
-  .noise-item {
-    font-size: 13px;
-    color: #999;
-    padding: 4px 0;
-  }
   .baseline-notice {
     font-size: 14px;
     color: #1e40af;
@@ -319,21 +305,6 @@ def render_knowledge_report(
         html += '<div class="section">\n<h2>Notes</h2>\n'
         for note in extraction_notes:
             html += f'<div class="note">{escape(note)}</div>\n'
-        html += '</div>\n'
-
-    # ── Noise
-    if noise:
-        html += '<div class="noise-section">\n<h2>Auto-Dismissed</h2>\n'
-        for entry in noise:
-            noise_type = entry.get("_noise_type", "changed")
-            label = escape(entry.get("label", ""))
-            if noise_type == "changed":
-                text = f'{label}: "{escape(entry.get("old_value", ""))}" vs "{escape(entry.get("new_value", ""))}"'
-            elif noise_type == "added":
-                text = f'{label} appeared: "{escape(entry.get("value", ""))}"'
-            else:
-                text = f'{label} disappeared: "{escape(entry.get("value", ""))}"'
-            html += f'<div class="noise-item">{text}</div>\n'
         html += '</div>\n'
 
     # ── Footer

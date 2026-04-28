@@ -235,9 +235,10 @@ def extract_all_pages(
 ) -> dict[str, Any]:
     """Extract knowledge from all pages in a crawl result, with hash gating.
 
-    If a page's hash matches the previous snapshot, its prior knowledge is
-    reused instead of calling Gemini again.  Changed or new pages are
-    extracted in parallel via a thread pool.
+    If a page's current hash matches the source_hash recorded in the previous
+    knowledge snapshot, its prior knowledge is reused instead of calling
+    Gemini again.  Changed or new pages are extracted in parallel via a
+    thread pool.
 
     Returns a knowledge snapshot dict::
 
@@ -252,7 +253,6 @@ def extract_all_pages(
     from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime, timezone
 
-    prev_pages = (previous_snapshot or {}).get("pages", {})
     prev_knowledge_pages = (previous_knowledge or {}).get("pages", {})
     current_pages = crawl_result.get("pages", {})
 
@@ -262,14 +262,15 @@ def extract_all_pages(
 
     for url, page_data in current_pages.items():
         current_hash = page_data.get("hash", "")
-        previous_hash = prev_pages.get(url, {}).get("hash", "")
+        knowledge_page = prev_knowledge_pages.get(url, {})
+        knowledge_source_hash = knowledge_page.get("source_hash", "")
 
         if (
             current_hash
-            and current_hash == previous_hash
-            and url in prev_knowledge_pages
+            and knowledge_source_hash
+            and current_hash == knowledge_source_hash
         ):
-            cached[url] = prev_knowledge_pages[url].get("knowledge_units", [])
+            cached[url] = knowledge_page.get("knowledge_units", [])
         else:
             to_extract[url] = str(page_data.get("text", ""))
 
@@ -299,10 +300,11 @@ def extract_all_pages(
     # Assemble result
     pages_out: dict[str, dict[str, Any]] = {}
     for url in current_pages:
+        page_hash = current_pages[url].get("hash", "")
         if url in cached:
-            pages_out[url] = {"url": url, "knowledge_units": cached[url]}
+            pages_out[url] = {"url": url, "source_hash": page_hash, "knowledge_units": cached[url]}
         else:
-            pages_out[url] = {"url": url, "knowledge_units": extracted.get(url, [])}
+            pages_out[url] = {"url": url, "source_hash": page_hash, "knowledge_units": extracted.get(url, [])}
 
     return {
         "schema_version": 1,
