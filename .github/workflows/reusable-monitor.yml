@@ -75,19 +75,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Only archive files (timestamped) get committed. `latest-*` files are
-          # refreshed every run so format/template changes propagate to notify,
-          # but we exclude them here to avoid daily heartbeat commits.
           git add 'reports/report-*.md' 'reports/summary-*.json' \
-                  'snapshots/snapshot-*.json' 'snapshots/knowledge-*.json' 2>/dev/null || true
+                  'snapshots/snapshot-*.json' 'snapshots/knowledge-*.json' \
+                  'snapshots/latest-snapshot.json' 'snapshots/latest-knowledge.json' \
+                  'reports/latest-report.md' 'reports/latest-summary.json' 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No output changes to commit."
             exit 0
           fi
           git commit -m "Automated website scan"
           for attempt in 1 2 3; do
-            # --autostash: `latest-*` files are refreshed every run and left
-            # unstaged in the workspace, which would otherwise block rebase.
             if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push origin HEAD:"${GITHUB_REF_NAME}"; then
               exit 0
             fi
