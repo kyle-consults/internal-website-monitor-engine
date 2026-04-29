@@ -16,7 +16,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 # ── Structured output schema for Gemini ──────────────────────────────────────
 
