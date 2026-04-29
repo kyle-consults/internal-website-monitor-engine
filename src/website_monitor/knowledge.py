@@ -253,6 +253,7 @@ def extract_all_pages(
     from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime, timezone
 
+    prev_pages = (previous_snapshot or {}).get("pages", {})
     prev_knowledge_pages = (previous_knowledge or {}).get("pages", {})
     current_pages = crawl_result.get("pages", {})
 
@@ -263,7 +264,10 @@ def extract_all_pages(
     for url, page_data in current_pages.items():
         current_hash = page_data.get("hash", "")
         knowledge_page = prev_knowledge_pages.get(url, {})
-        knowledge_source_hash = knowledge_page.get("source_hash", "")
+        knowledge_source_hash = knowledge_page.get(
+            "source_hash",
+            prev_pages.get(url, {}).get("hash", ""),
+        )
 
         if (
             current_hash
